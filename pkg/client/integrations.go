@@ -14,7 +14,7 @@ import (
 	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
 
-	jevargosv1 "github.com/jev-argos/jev-argos/gen/v1"
+	jevargosv1 "github.com/jornJp0201/jev-argos/gen/v1"
 )
 
 // BlockChecker は遮断中かを判定できるもの (通常は *BlocklistWatcher)。

@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	jevargosv1 "github.com/jev-argos/jev-argos/gen/v1"
+	jevargosv1 "github.com/jornJp0201/jev-argos/gen/v1"
 )
 
 const retention = RetentionSeconds * time.Second

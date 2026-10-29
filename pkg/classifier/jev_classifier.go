@@ -6,7 +6,7 @@ package classifier
 import (
 	"math"
 
-	"github.com/jev-argos/jev-argos/pkg/buffer"
+	"github.com/jornJp0201/jev-argos/pkg/buffer"
 )
 
 const (

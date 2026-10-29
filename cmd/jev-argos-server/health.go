@@ -11,7 +11,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 
-	jevargosv1 "github.com/jev-argos/jev-argos/gen/v1"
+	jevargosv1 "github.com/jornJp0201/jev-argos/gen/v1"
 )
 
 // localAddr は待受アドレスを、同じホストから接続するためのアドレスに変換する (":8080" → "127.0.0.1:8080")。

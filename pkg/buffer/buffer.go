@@ -9,7 +9,7 @@ package buffer
 import (
 	"context"
 
-	jevargosv1 "github.com/jev-argos/jev-argos/gen/v1"
+	jevargosv1 "github.com/jornJp0201/jev-argos/gen/v1"
 )
 
 // RetentionSeconds はバッファがシグナルを保持する期間 (秒)。

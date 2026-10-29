@@ -11,8 +11,8 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/encoding/protojson"
 
-	jevargosv1 "github.com/jev-argos/jev-argos/gen/v1"
-	"github.com/jev-argos/jev-argos/pkg/guardrail"
+	jevargosv1 "github.com/jornJp0201/jev-argos/gen/v1"
+	"github.com/jornJp0201/jev-argos/pkg/guardrail"
 )
 
 const (

@@ -16,9 +16,9 @@ import (
 
 	"google.golang.org/protobuf/encoding/protojson"
 
-	"github.com/jev-argos/jev-argos/pkg/api"
-	"github.com/jev-argos/jev-argos/pkg/approval"
-	"github.com/jev-argos/jev-argos/pkg/receiver"
+	"github.com/jornJp0201/jev-argos/pkg/api"
+	"github.com/jornJp0201/jev-argos/pkg/approval"
+	"github.com/jornJp0201/jev-argos/pkg/receiver"
 )
 
 // Message は SSE の 1 イベント。

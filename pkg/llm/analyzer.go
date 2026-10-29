@@ -12,9 +12,9 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/jev-argos/jev-argos/pkg/approval"
-	"github.com/jev-argos/jev-argos/pkg/db"
-	"github.com/jev-argos/jev-argos/pkg/receiver"
+	"github.com/jornJp0201/jev-argos/pkg/approval"
+	"github.com/jornJp0201/jev-argos/pkg/db"
+	"github.com/jornJp0201/jev-argos/pkg/receiver"
 )
 
 // Facts は LLM に渡す判定の材料 (JSON にしてユーザーメッセージに入れる)。

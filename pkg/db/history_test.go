@@ -10,8 +10,8 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/jev-argos/jev-argos/pkg/approval"
-	"github.com/jev-argos/jev-argos/pkg/guardrail"
+	"github.com/jornJp0201/jev-argos/pkg/approval"
+	"github.com/jornJp0201/jev-argos/pkg/guardrail"
 )
 
 // 判定ログ + 分析 + 履歴の共通の振る舞い (SQLite は常に、PostgreSQL は環境変数があるときに実行する)。

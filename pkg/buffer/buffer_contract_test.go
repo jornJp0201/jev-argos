@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	jevargosv1 "github.com/jev-argos/jev-argos/gen/v1"
+	jevargosv1 "github.com/jornJp0201/jev-argos/gen/v1"
 )
 
 // Buffer 実装が共通で満たすべき振る舞いのテスト。各実装のテストから runContractTests を呼ぶ。

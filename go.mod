@@ -1,4 +1,4 @@
-module github.com/jev-argos/jev-argos
+module github.com/jornJp0201/jev-argos
 
 go 1.26.0
 
@@ -9,6 +9,7 @@ tool (
 
 require (
 	github.com/alicebob/miniredis/v2 v2.33.0
+	github.com/anthropics/anthropic-sdk-go/v2 v2.4.0
 	github.com/jackc/pgx/v5 v5.7.1
 	github.com/pashagolub/pgxmock/v4 v4.3.0
 	github.com/redis/go-redis/v9 v9.7.0
@@ -19,7 +20,6 @@ require (
 
 require (
 	github.com/alicebob/gopher-json v0.0.0-20200520072559-a9ecdc9d1d3a // indirect
-	github.com/anthropics/anthropic-sdk-go/v2 v2.4.0 // indirect
 	github.com/bahlo/generic-list-go v0.2.0 // indirect
 	github.com/buger/jsonparser v1.1.2 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
@@ -37,7 +37,6 @@ require (
 	github.com/pb33f/ordered-map/v2 v2.3.1 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/standard-webhooks/standard-webhooks/libraries v0.0.1 // indirect
-	github.com/stretchr/testify v1.11.1 // indirect
 	github.com/tidwall/gjson v1.18.0 // indirect
 	github.com/tidwall/match v1.1.1 // indirect
 	github.com/tidwall/pretty v1.2.1 // indirect

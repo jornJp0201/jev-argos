@@ -8,10 +8,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/jev-argos/jev-argos/pkg/approval"
-	"github.com/jev-argos/jev-argos/pkg/db"
-	"github.com/jev-argos/jev-argos/pkg/guardrail"
-	"github.com/jev-argos/jev-argos/pkg/receiver"
+	"github.com/jornJp0201/jev-argos/pkg/approval"
+	"github.com/jornJp0201/jev-argos/pkg/db"
+	"github.com/jornJp0201/jev-argos/pkg/guardrail"
+	"github.com/jornJp0201/jev-argos/pkg/receiver"
 )
 
 // Sink は分析結果の配信先。

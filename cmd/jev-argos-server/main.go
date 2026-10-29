@@ -31,14 +31,14 @@ import (
 	"google.golang.org/grpc/health"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 
-	jevargosv1 "github.com/jev-argos/jev-argos/gen/v1"
-	"github.com/jev-argos/jev-argos/pkg/action"
-	"github.com/jev-argos/jev-argos/pkg/api"
-	"github.com/jev-argos/jev-argos/pkg/approval"
-	"github.com/jev-argos/jev-argos/pkg/classifier"
-	"github.com/jev-argos/jev-argos/pkg/events"
-	"github.com/jev-argos/jev-argos/pkg/llm"
-	"github.com/jev-argos/jev-argos/pkg/receiver"
+	jevargosv1 "github.com/jornJp0201/jev-argos/gen/v1"
+	"github.com/jornJp0201/jev-argos/pkg/action"
+	"github.com/jornJp0201/jev-argos/pkg/api"
+	"github.com/jornJp0201/jev-argos/pkg/approval"
+	"github.com/jornJp0201/jev-argos/pkg/classifier"
+	"github.com/jornJp0201/jev-argos/pkg/events"
+	"github.com/jornJp0201/jev-argos/pkg/llm"
+	"github.com/jornJp0201/jev-argos/pkg/receiver"
 )
 
 func main() {

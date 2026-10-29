@@ -14,9 +14,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jev-argos/jev-argos/pkg/guardrail"
-	"github.com/jev-argos/jev-argos/pkg/receiver"
-	"github.com/jev-argos/jev-argos/pkg/webhook"
+	"github.com/jornJp0201/jev-argos/pkg/guardrail"
+	"github.com/jornJp0201/jev-argos/pkg/receiver"
+	"github.com/jornJp0201/jev-argos/pkg/webhook"
 )
 
 // Alert は通知 1 件の内容。Webhook ではこの JSON がそのまま送られる。

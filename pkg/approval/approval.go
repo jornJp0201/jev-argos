@@ -16,8 +16,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jev-argos/jev-argos/pkg/guardrail"
-	"github.com/jev-argos/jev-argos/pkg/receiver"
+	"github.com/jornJp0201/jev-argos/pkg/guardrail"
+	"github.com/jornJp0201/jev-argos/pkg/receiver"
 )
 
 // Status はアクションの状態。

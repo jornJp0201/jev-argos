@@ -14,13 +14,13 @@ import (
 
 	"github.com/anthropics/anthropic-sdk-go/v2/option"
 
-	jevargosv1 "github.com/jev-argos/jev-argos/gen/v1"
-	"github.com/jev-argos/jev-argos/pkg/approval"
-	"github.com/jev-argos/jev-argos/pkg/buffer"
-	"github.com/jev-argos/jev-argos/pkg/classifier"
-	"github.com/jev-argos/jev-argos/pkg/db"
-	"github.com/jev-argos/jev-argos/pkg/guardrail"
-	"github.com/jev-argos/jev-argos/pkg/receiver"
+	jevargosv1 "github.com/jornJp0201/jev-argos/gen/v1"
+	"github.com/jornJp0201/jev-argos/pkg/approval"
+	"github.com/jornJp0201/jev-argos/pkg/buffer"
+	"github.com/jornJp0201/jev-argos/pkg/classifier"
+	"github.com/jornJp0201/jev-argos/pkg/db"
+	"github.com/jornJp0201/jev-argos/pkg/guardrail"
+	"github.com/jornJp0201/jev-argos/pkg/receiver"
 )
 
 var ctx = context.Background()

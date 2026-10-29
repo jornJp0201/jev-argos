@@ -17,10 +17,10 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	jevargosv1 "github.com/jev-argos/jev-argos/gen/v1"
-	"github.com/jev-argos/jev-argos/pkg/buffer"
-	"github.com/jev-argos/jev-argos/pkg/classifier"
-	"github.com/jev-argos/jev-argos/pkg/guardrail"
+	jevargosv1 "github.com/jornJp0201/jev-argos/gen/v1"
+	"github.com/jornJp0201/jev-argos/pkg/buffer"
+	"github.com/jornJp0201/jev-argos/pkg/classifier"
+	"github.com/jornJp0201/jev-argos/pkg/guardrail"
 )
 
 // Event は 1 シグナルの判定結果一式。

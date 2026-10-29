@@ -3,7 +3,7 @@ package action
 import (
 	"time"
 
-	jevargosv1 "github.com/jev-argos/jev-argos/gen/v1"
+	jevargosv1 "github.com/jornJp0201/jev-argos/gen/v1"
 )
 
 // ControlServer は遮断リストを配信する gRPC サービス (jevargos.v1.ControlService)。

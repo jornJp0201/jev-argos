@@ -7,11 +7,11 @@ import (
 	"testing"
 	"time"
 
-	jevargosv1 "github.com/jev-argos/jev-argos/gen/v1"
-	"github.com/jev-argos/jev-argos/pkg/buffer"
-	"github.com/jev-argos/jev-argos/pkg/classifier"
-	"github.com/jev-argos/jev-argos/pkg/guardrail"
-	"github.com/jev-argos/jev-argos/pkg/receiver"
+	jevargosv1 "github.com/jornJp0201/jev-argos/gen/v1"
+	"github.com/jornJp0201/jev-argos/pkg/buffer"
+	"github.com/jornJp0201/jev-argos/pkg/classifier"
+	"github.com/jornJp0201/jev-argos/pkg/guardrail"
+	"github.com/jornJp0201/jev-argos/pkg/receiver"
 )
 
 type clock struct {

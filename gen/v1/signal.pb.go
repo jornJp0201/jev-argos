@@ -658,7 +658,7 @@ const file_signal_proto_rawDesc = "" +
 	"\fReportSignal\x12\x1b.jevargos.v1.SecuritySignal\x1a\x1b.jevargos.v1.ReportResponse\x12K\n" +
 	"\rStreamSignals\x12\x1b.jevargos.v1.SecuritySignal\x1a\x1b.jevargos.v1.ReportResponse(\x012e\n" +
 	"\x0eControlService\x12S\n" +
-	"\x0eWatchBlocklist\x12\".jevargos.v1.WatchBlocklistRequest\x1a\x1b.jevargos.v1.BlocklistEvent0\x01B2Z0github.com/jev-argos/jev-argos/gen/v1;jevargosv1b\x06proto3"
+	"\x0eWatchBlocklist\x12\".jevargos.v1.WatchBlocklistRequest\x1a\x1b.jevargos.v1.BlocklistEvent0\x01B3Z1github.com/jornJp0201/jev-argos/gen/v1;jevargosv1b\x06proto3"
 
 var (
 	file_signal_proto_rawDescOnce sync.Once

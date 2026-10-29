@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package jevargos.v1;
 
-option go_package = "github.com/jev-argos/jev-argos/gen/v1;jevargosv1";
+option go_package = "github.com/jornJp0201/jev-argos/gen/v1;jevargosv1";
 
 // 監視シグナル収集サービス
 service SignalService {

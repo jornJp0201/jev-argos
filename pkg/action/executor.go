@@ -8,10 +8,10 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/jev-argos/jev-argos/pkg/approval"
-	"github.com/jev-argos/jev-argos/pkg/guardrail"
-	"github.com/jev-argos/jev-argos/pkg/receiver"
-	"github.com/jev-argos/jev-argos/pkg/webhook"
+	"github.com/jornJp0201/jev-argos/pkg/approval"
+	"github.com/jornJp0201/jev-argos/pkg/guardrail"
+	"github.com/jornJp0201/jev-argos/pkg/receiver"
+	"github.com/jornJp0201/jev-argos/pkg/webhook"
 )
 
 // BlocklistExecutor は承認された block_ip を遮断リストに登録する approval.Executor。

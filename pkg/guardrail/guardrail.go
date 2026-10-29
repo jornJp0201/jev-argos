@@ -2,7 +2,7 @@
 // Jev の評価結果 (S, C) から対応レベルを決定する。
 package guardrail
 
-import "github.com/jev-argos/jev-argos/pkg/classifier"
+import "github.com/jornJp0201/jev-argos/pkg/classifier"
 
 // Level は判定結果の対応レベル (設計書 5 章)。
 type Level int

@@ -9,7 +9,7 @@ import (
 
 	"google.golang.org/grpc"
 
-	jevargosv1 "github.com/jev-argos/jev-argos/gen/v1"
+	jevargosv1 "github.com/jornJp0201/jev-argos/gen/v1"
 )
 
 // BlocklistWatcher はコントロールサーバーの遮断リスト (ControlService.WatchBlocklist) を購読し、手元に保持する。

@@ -9,7 +9,7 @@ import (
 
 	_ "modernc.org/sqlite" // CGO 不要の純 Go ドライバ (distroless イメージでも動く)
 
-	"github.com/jev-argos/jev-argos/pkg/approval"
+	"github.com/jornJp0201/jev-argos/pkg/approval"
 )
 
 // SQLiteStore は SQLite に判定ログを保存する (設計書 7.2: 開発用の Zero Config 構成)。

@@ -21,14 +21,14 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 
-	"github.com/jev-argos/jev-argos/pkg/action"
-	"github.com/jev-argos/jev-argos/pkg/api"
-	"github.com/jev-argos/jev-argos/pkg/approval"
-	"github.com/jev-argos/jev-argos/pkg/buffer"
-	"github.com/jev-argos/jev-argos/pkg/db"
-	"github.com/jev-argos/jev-argos/pkg/llm"
-	"github.com/jev-argos/jev-argos/pkg/notify"
-	"github.com/jev-argos/jev-argos/pkg/receiver"
+	"github.com/jornJp0201/jev-argos/pkg/action"
+	"github.com/jornJp0201/jev-argos/pkg/api"
+	"github.com/jornJp0201/jev-argos/pkg/approval"
+	"github.com/jornJp0201/jev-argos/pkg/buffer"
+	"github.com/jornJp0201/jev-argos/pkg/db"
+	"github.com/jornJp0201/jev-argos/pkg/llm"
+	"github.com/jornJp0201/jev-argos/pkg/notify"
+	"github.com/jornJp0201/jev-argos/pkg/receiver"
 )
 
 const cleanupInterval = 30 * time.Second

@@ -14,8 +14,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jev-argos/jev-argos/pkg/action"
-	"github.com/jev-argos/jev-argos/pkg/approval"
+	"github.com/jornJp0201/jev-argos/pkg/action"
+	"github.com/jornJp0201/jev-argos/pkg/approval"
 )
 
 const token = "test-token"

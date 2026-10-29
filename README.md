@@ -107,7 +107,7 @@ export const GET = withJevArgos(reporter, { route: "/api/users/[id]", sourceServ
 **Go の BFF**
 
 ```go
-import "github.com/jev-argos/jev-argos/pkg/client"
+import "github.com/jornJp0201/jev-argos/pkg/client"
 
 conn, _ := grpc.NewClient("localhost:50051", grpc.WithTransportCredentials(insecure.NewCredentials()))
 reporter := client.NewReporter(conn, client.ReporterOptions{})
@@ -270,10 +270,14 @@ Redis・LLM (Ollama / Claude)・Slack のテストは擬似サーバーで動く
 - **遮断以外の対処の実行**: セッション無効化・アカウント操作・データ削除・縮小運転・サービス停止は、アプリが受信エンドポイント (`JEV_ARGOS_ACTION_WEBHOOK_URL`) を用意して実行する。jev-argos は署名付きで依頼するだけ。
 - **複数台構成**: Redis (統計・遮断リスト) と PostgreSQL (承認キュー) を使うと複数台で共有される。指定しない場合はメモリ上にあり、再起動で消える。
 - **通信の暗号化と認証**: gRPC・管理 API とも TLS は内蔵していない。管理 API は共有トークン方式で、承認者名は自己申告。本番ではサービスメッシュやリバースプロキシで TLS と管理者の認証を行う。
-- **パッケージの公開**: Docker イメージ・npm パッケージとも未公開 (ローカルでビルドして使う)。
+- **パッケージの公開**: Docker イメージ・npm パッケージとも未公開 (ローカルでビルドして使う)。Go のパッケージは `go get github.com/jornJp0201/jev-argos/pkg/client` で取得できる。
 - **性能検証**: 設計書 9 章の性能検証 (判定までのレイテンシ、LLM 単体との比較) は未実施。
 
 詳細な設計は [docs/jev_argos_spec.md](docs/jev_argos_spec.md) を参照。
+
+## ライセンス
+
+[MIT License](LICENSE)
 
 ## 付属: Web ダッシュボード
 

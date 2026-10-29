@@ -4,7 +4,7 @@ import (
 	"math"
 	"testing"
 
-	"github.com/jev-argos/jev-argos/pkg/classifier"
+	"github.com/jornJp0201/jev-argos/pkg/classifier"
 )
 
 func TestDecide(t *testing.T) {

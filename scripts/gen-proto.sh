@@ -16,6 +16,6 @@ protoc \
   --plugin=protoc-gen-go="$bin_dir/protoc-gen-go" \
   --plugin=protoc-gen-go-grpc="$bin_dir/protoc-gen-go-grpc" \
   --proto_path=proto \
-  --go_out=. --go_opt=module=github.com/jev-argos/jev-argos \
-  --go-grpc_out=. --go-grpc_opt=module=github.com/jev-argos/jev-argos \
+  --go_out=. --go_opt=module=github.com/jornJp0201/jev-argos \
+  --go-grpc_out=. --go-grpc_opt=module=github.com/jornJp0201/jev-argos \
   proto/*.proto

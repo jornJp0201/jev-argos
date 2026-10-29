@@ -4,9 +4,9 @@ import (
 	"math"
 	"testing"
 
-	"github.com/jev-argos/jev-argos/pkg/buffer"
-	"github.com/jev-argos/jev-argos/pkg/classifier"
-	"github.com/jev-argos/jev-argos/pkg/guardrail"
+	"github.com/jornJp0201/jev-argos/pkg/buffer"
+	"github.com/jornJp0201/jev-argos/pkg/classifier"
+	"github.com/jornJp0201/jev-argos/pkg/guardrail"
 )
 
 type fixedModel struct{ score, confidence float64 }
