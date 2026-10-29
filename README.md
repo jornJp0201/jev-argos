@@ -145,7 +145,7 @@ msg="jev-argos action" level=3 downgraded=true score=3.6 confidence=0.625 client
 | 判定サーバーを複数台にする | `JEV_ARGOS_REDIS_URL` と `JEV_ARGOS_POSTGRES_URL` を指定 |
 | LLM 分析を使う | Ollama を入れて `ollama pull qwen2.5:3b` (Claude なら `JEV_ARGOS_LLM_PROVIDER=anthropic`) |
 | Slack に通知する | `JEV_ARGOS_SLACK_WEBHOOK_URL` を指定 |
-| 承認待ちを確認・承認する | 管理 API、または [Web ダッシュボード](#おまけ-web-ダッシュボード) |
+| 承認待ちを確認・承認する | 管理 API、または [Web ダッシュボード](#付属-web-ダッシュボード) |
 | 自社の環境に合わせる | [差し替えポイント](#差し替えポイント) |
 
 設定の一覧は [判定サーバーの README](cmd/jev-argos-server/README.md#設定) にあります。
@@ -171,8 +171,8 @@ msg="jev-argos action" level=3 downgraded=true score=3.6 confidence=0.625 client
 **安全装置**: スコアが危険域 (S ≥ 3.5) でも、確信度が 0.8 未満なら自動遮断せず Level 3 (人間の判断) に回します。
 LLM が提案した対処や、アカウント削除のような取り消せない操作も、管理者が承認するまで実行されません。
 
-**なぜ LLM だけで判定しないのか**: LLM は 1 件の判定に 1〜3 秒かかり、全リクエストに使うとコストも大きくなります。
-jev-argos では Jev がすべてのリクエストをミリ秒で採点し、LLM は怪しいものだけを分析します。
+**なぜ LLM だけで判定しないのか**: LLM は 1 件の判定に秒単位の時間がかかることが多く、全リクエストに使うとコストも大きくなります。
+jev-argos では Jev がすべてのリクエストを軽い計算で採点し (ミリ秒単位が目標。性能は未検証)、LLM は怪しいものだけを分析します。
 
 ## 差し替えポイント
 
@@ -210,7 +210,7 @@ grep -rn "差し替えポイント" cmd pkg packages/*/src packages/dashboard/*.
 | **統計の保存先** | `pkg/buffer` の `Buffer` | メモリ / Redis |
 | **LLM 用 DB ユーザーの権限** | `pkg/db` の Safe View の定義 (SQL コメント) | — (本番で設定する) |
 
-Web ダッシュボードの差し替えポイントは [おまけ: Web ダッシュボード](#おまけ-web-ダッシュボード) を参照。
+Web ダッシュボードの差し替えポイントは [付属: Web ダッシュボード](#付属-web-ダッシュボード) を参照。
 
 ## リポジトリの構成
 
@@ -219,7 +219,7 @@ Web ダッシュボードの差し替えポイントは [おまけ: Web ダッ�
 | `packages/adapter-node` | TypeScript | `@jornjp/adapter-node` — Node.js の BFF 用アダプター | [README](packages/adapter-node/README.md) |
 | `pkg/client` | Go | Go の BFF 用アダプター | 上記「Go の BFF」 |
 | `cmd/jev-argos-server` + `pkg/` | Go | 判定サーバー (受信・採点・遮断・承認キュー・LLM 分析・通知・管理 API) | [README](cmd/jev-argos-server/README.md) |
-| `packages/dashboard` | TypeScript / React | おまけの Web ダッシュボード | [README](packages/dashboard/README.md) |
+| `packages/dashboard` | TypeScript / React | 付属の Web ダッシュボード (任意) | [README](packages/dashboard/README.md) |
 
 ```
 .
@@ -241,7 +241,7 @@ Web ダッシュボードの差し替えポイントは [おまけ: Web ダッ�
 ├── cmd/jev-argos-server/   判定サーバーのエントリポイント (部品の組み立てと設定)
 ├── proto/signal.proto      アダプターとサーバーの通信の定義
 ├── gen/v1/                 proto から生成した Go コード
-├── packages/dashboard/     おまけの Web ダッシュボード
+├── packages/dashboard/     付属の Web ダッシュボード (任意)
 ├── docs/jev_argos_spec.md  設計書
 ├── Dockerfile              判定サーバーのイメージ
 └── docker-compose.yml      一式を起動するローカル検証環境
@@ -275,7 +275,7 @@ Redis・LLM (Ollama / Claude)・Slack のテストは擬似サーバーで動く
 
 詳細な設計は [docs/jev_argos_spec.md](docs/jev_argos_spec.md) を参照。
 
-## おまけ: Web ダッシュボード
+## 付属: Web ダッシュボード
 
 ライブラリの動作を目で確かめたり、承認待ちを画面で操作したりするための Web アプリ (React) を同梱しています。
 jev-argos の利用に必須ではなく、管理 API を自社の管理画面から呼んでもかまいません。
