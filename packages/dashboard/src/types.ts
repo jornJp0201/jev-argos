@@ -32,12 +32,17 @@ export interface Features {
 }
 
 export interface LlmAnalysis {
-  status: "pending" | "done" | "unavailable";
-  /** 解析モデル名 (例: "mock")。 */
-  model?: string;
+  status: "pending" | "done" | "failed";
+  /** 分析した LLM (例: "ollama/qwen2.5:3b")。デモでは "mock"。 */
+  provider?: string;
+  /** IP・ユーザー ID を伏せて LLM に送ったか。 */
+  masked?: boolean;
   summary?: string;
   factors?: string[];
   recommendation?: string;
+  /** LLM が推奨した対処 (承認キューに提案される)。 */
+  recommended_action?: string;
+  error?: string;
 }
 
 export interface DecisionEvent {
@@ -52,7 +57,11 @@ export interface DecisionEvent {
   llm?: LlmAnalysis;
 }
 
-/** ダッシュボードのデータ取得元。実 API 実装に差し替えられるようにする。 */
+/**
+ * ダッシュボードのデータ取得元。
+ * [差し替えポイント] 既定は ApiDataSource (コントロールサーバーの /api/events/stream)。
+ * 独自の配信基盤を使う場合はこのインターフェースを実装し、App.tsx の source を差し替える。
+ */
 export interface DataSource {
   /** データ元の表示名 (例: "デモデータ")。 */
   readonly label: string;
@@ -60,6 +69,7 @@ export interface DataSource {
   /** 新しいイベントと、LLM 解析結果の更新を購読する。戻り値で購読解除。 */
   subscribe(handlers: {
     onEvent: (e: DecisionEvent) => void;
-    onLlmUpdate: (signalId: string, llm: LlmAnalysis) => void;
+    onLlmUpdate: (signalId: string, clientIp: string, llm: LlmAnalysis) => void;
+    onStatus?: (status: "connecting" | "live" | "offline") => void;
   }): () => void;
 }

@@ -1,6 +1,8 @@
 // 管理 API (Go: pkg/api) の承認待ちアクション。
 // 認証ヘッダーは開発サーバーのプロキシ (vite.config.ts) または本番のリバースプロキシが付与する。
 
+import type { LlmAnalysis } from "../types";
+
 export type ActionStatus = "pending" | "approved" | "rejected";
 
 export interface ActionEvidence {
@@ -18,12 +20,25 @@ export interface ActionEvidence {
   signal_timestamp: string;
 }
 
+export type ActionType =
+  | "block_ip"
+  | "revoke_session"
+  | "enable_fallback"
+  | "suspend_account"
+  | "delete_account"
+  | "delete_data"
+  | "stop_service";
+
 export interface PendingAction {
   action_id: string;
   signal_id: string;
-  proposed_action: "block_ip" | string;
+  proposed_action: ActionType | string;
   target: string;
   reason: string;
+  /** 提案の出どころ: Jev の判定 / LLM の推奨 / 管理者の起票。 */
+  source: "jev" | "llm" | "admin" | string;
+  /** 取り消せない操作 (アカウント削除・データ削除・サービス停止)。 */
+  irreversible: boolean;
   status: ActionStatus;
   evidence: ActionEvidence;
   event_count: number;
@@ -32,6 +47,11 @@ export interface PendingAction {
   decided_at?: string;
   decided_by?: string;
   decision_note?: string;
+  /** 承認後の実行結果。executed_at が無ければ未実行。 */
+  executed_at?: string;
+  execution_error?: string;
+  /** 同じ対象についての最新の LLM 分析。 */
+  analysis?: LlmAnalysis;
 }
 
 export class ApiError extends Error {
@@ -59,6 +79,12 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const actionsApi = {
+  create: (proposedAction: ActionType, target: string, reason: string, createdBy: string) =>
+    request<PendingAction>("/api/actions", {
+      method: "POST",
+      body: JSON.stringify({ proposed_action: proposedAction, target, reason, created_by: createdBy }),
+    }),
+
   list: () => request<{ actions: PendingAction[] }>("/api/actions").then((r) => r.actions),
 
   decide: (id: string, decision: "approve" | "reject", decidedBy: string, note: string) =>

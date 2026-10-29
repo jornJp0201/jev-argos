@@ -1,17 +1,18 @@
-import { Bot, Check, Cpu, Loader2, ShieldAlert, ShieldCheck, TriangleAlert, X } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { Bot, Check, CircleCheck, CircleX, Cpu, Loader2, ShieldAlert, ShieldCheck, TriangleAlert, X } from "lucide-react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { ApiError, actionsApi, type PendingAction } from "../data/actionsApi";
+import { IrreversibleBadge, SourceBadge, actionLabel } from "../lib/actions";
 import { fmtAgo, fmtTime } from "../lib/format";
 import { BLOCK_CONFIDENCE, BLOCK_SCORE, SATURATION, normalizedFeatures } from "../lib/jev";
 import type { Level } from "../types";
 import { FeatureRow, ScoreScale } from "./DetailPanel";
+import { LlmAnalysisView, LlmProviderBadge } from "./LlmAnalysisView";
 
-const ACTION_LABEL: Record<string, string> = { block_ip: "IP の一時遮断" };
-export const actionLabel = (t: string) => ACTION_LABEL[t] ?? t;
+export { actionLabel };
 
 const DECIDER_KEY = "jev-argos.decided-by";
 
-function loadDecider(): string {
+export function loadDecider(): string {
   try {
     return localStorage.getItem(DECIDER_KEY) ?? "";
   } catch {
@@ -19,7 +20,7 @@ function loadDecider(): string {
   }
 }
 
-function saveDecider(name: string) {
+export function saveDecider(name: string) {
   try {
     localStorage.setItem(DECIDER_KEY, name);
   } catch {
@@ -37,6 +38,46 @@ export function StatusChip({ status }: { status: PendingAction["status"] }) {
   return <span className={`rounded-md px-2 py-0.5 text-xs font-medium ring-1 ring-inset ${style}`}>{label}</span>;
 }
 
+function Section({ title, icon, aside, children }: { title: string; icon?: ReactNode; aside?: ReactNode; children: ReactNode }) {
+  return (
+    <section className="rounded-lg border border-white/5 bg-slate-950/40 p-4">
+      <h3 className="mb-3 flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-slate-400">
+        {icon}
+        {title}
+        {aside && <span className="ml-auto normal-case tracking-normal">{aside}</span>}
+      </h3>
+      {children}
+    </section>
+  );
+}
+
+function ExecutionResult({ action }: { action: PendingAction }) {
+  if (action.status !== "approved") return null;
+  if (!action.executed_at) {
+    return (
+      <p className="flex items-center gap-1.5 text-xs text-slate-400">
+        <Loader2 className="h-3.5 w-3.5 animate-spin" /> 実行中…
+      </p>
+    );
+  }
+  if (action.execution_error) {
+    return (
+      <div className="space-y-1 text-xs">
+        <p className="flex items-center gap-1.5 text-rose-300">
+          <CircleX className="h-3.5 w-3.5" /> 実行に失敗しました ({fmtTime(action.executed_at)})
+        </p>
+        <p className="break-all font-mono text-[11px] text-slate-500">{action.execution_error}</p>
+      </div>
+    );
+  }
+  return (
+    <p className="flex items-center gap-1.5 text-xs text-emerald-300">
+      <CircleCheck className="h-3.5 w-3.5" />
+      {action.proposed_action === "block_ip" ? "遮断リストに登録しました" : "アプリへ実行を依頼しました"} ({fmtTime(action.executed_at)})
+    </p>
+  );
+}
+
 interface Props {
   action: PendingAction;
   onClose: () => void;
@@ -48,6 +89,8 @@ export function ActionModal({ action, onClose, onDecided }: Props) {
   const [decidedBy, setDecidedBy] = useState(loadDecider);
   const [note, setNote] = useState("");
   const [confirming, setConfirming] = useState<"approve" | "reject">();
+  // 不可逆な操作は、対象を入力しないと承認できない
+  const [typedTarget, setTypedTarget] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string>();
   // このモーダルで決定したか (他の管理者による決定と区別する)
@@ -62,7 +105,11 @@ export function ActionModal({ action, onClose, onDecided }: Props) {
   }, [onClose]);
 
   const pending = action.status === "pending";
+  const isBlock = action.proposed_action === "block_ip";
+  const targetConfirmed = !action.irreversible || typedTarget.trim() === action.target;
   const canSubmit = pending && decidedBy.trim() !== "" && !submitting;
+  // Jev の判定に基づく提案か (管理者の起票には判定の根拠が無い)
+  const hasJudgement = action.source !== "admin";
 
   const submit = async (decision: "approve" | "reject") => {
     if (confirming !== decision) {
@@ -86,6 +133,7 @@ export function ActionModal({ action, onClose, onDecided }: Props) {
 
   const [nErr, nDenied, nLatency] = normalizedFeatures(ev);
   const level = Math.min(4, Math.max(1, ev.level)) as Level;
+  const approveLabel = isBlock ? "遮断を承認" : "実行を承認";
 
   return (
     <div
@@ -97,8 +145,12 @@ export function ActionModal({ action, onClose, onDecided }: Props) {
     >
       <div className="flex max-h-[90vh] w-full max-w-3xl flex-col overflow-hidden rounded-2xl border border-white/10 bg-slate-900 shadow-2xl shadow-black/50">
         <header className="flex items-start gap-3 border-b border-white/5 px-6 py-4">
-          <div className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-amber-500/10 ring-1 ring-inset ring-amber-400/30">
-            <ShieldAlert className="h-5 w-5 text-amber-300" />
+          <div
+            className={`grid h-9 w-9 shrink-0 place-items-center rounded-lg ring-1 ring-inset ${
+              action.irreversible ? "bg-rose-500/10 ring-rose-400/40" : "bg-amber-500/10 ring-amber-400/30"
+            }`}
+          >
+            <ShieldAlert className={`h-5 w-5 ${action.irreversible ? "text-rose-300" : "text-amber-300"}`} />
           </div>
           <div className="min-w-0 flex-1">
             <div className="flex flex-wrap items-center gap-2">
@@ -106,9 +158,12 @@ export function ActionModal({ action, onClose, onDecided }: Props) {
                 {actionLabel(action.proposed_action)}: <span className="font-mono">{action.target}</span>
               </h2>
               <StatusChip status={action.status} />
+              <SourceBadge source={action.source} />
+              {action.irreversible && <IrreversibleBadge />}
             </div>
             <p className="mt-0.5 font-mono text-[11px] text-slate-500">
-              {action.action_id} · 提案 {fmtTime(action.created_at)} · 最終更新 {fmtAgo(action.updated_at)} · 判定 {action.event_count} 件
+              {action.action_id} · 提案 {fmtTime(action.created_at)} · 最終更新 {fmtAgo(action.updated_at)}
+              {hasJudgement && ` · 判定 ${action.event_count} 件`}
             </p>
           </div>
           <button ref={closeRef} onClick={onClose} className="rounded-md p-1 text-slate-400 hover:bg-white/5 hover:text-slate-200" aria-label="閉じる">
@@ -118,76 +173,92 @@ export function ActionModal({ action, onClose, onDecided }: Props) {
 
         <div className="grid gap-4 overflow-auto p-6 md:grid-cols-2">
           <div className="space-y-4">
-            <section className="rounded-lg border border-white/5 bg-slate-950/40 p-4">
-              <h3 className="mb-3 flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-slate-400">
-                <ShieldCheck className="h-3.5 w-3.5" /> AI の判定根拠
-              </h3>
-              <ScoreScale score={ev.score} level={level} />
-              <div className="mt-4 space-y-1.5 rounded-md bg-slate-900/80 p-3 font-mono text-xs">
-                <div className="flex justify-between">
-                  <span className="text-slate-400">S ≥ {BLOCK_SCORE}</span>
-                  <span className={ev.score >= BLOCK_SCORE ? "text-rose-300" : "text-slate-500"}>
-                    {ev.score.toFixed(2)} {ev.score >= BLOCK_SCORE ? "✓" : "✗"}
-                  </span>
-                </div>
-                <div className="flex justify-between">
-                  <span className="text-slate-400">C ≥ {BLOCK_CONFIDENCE}</span>
-                  <span className={ev.confidence >= BLOCK_CONFIDENCE ? "text-rose-300" : "text-slate-500"}>
-                    {ev.confidence.toFixed(2)} {ev.confidence >= BLOCK_CONFIDENCE ? "✓" : "✗"}
-                  </span>
-                </div>
-              </div>
-              <p className="mt-3 flex gap-1.5 text-xs leading-relaxed text-amber-100/90">
+            <Section title={hasJudgement ? "AI の判定根拠" : "起票の理由"} icon={<ShieldCheck className="h-3.5 w-3.5" />}>
+              {hasJudgement && (
+                <>
+                  <ScoreScale score={ev.score} level={level} />
+                  <div className="mt-4 space-y-1.5 rounded-md bg-slate-900/80 p-3 font-mono text-xs">
+                    <div className="flex justify-between">
+                      <span className="text-slate-400">S ≥ {BLOCK_SCORE}</span>
+                      <span className={ev.score >= BLOCK_SCORE ? "text-rose-300" : "text-slate-500"}>
+                        {ev.score.toFixed(2)} {ev.score >= BLOCK_SCORE ? "✓" : "✗"}
+                      </span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-slate-400">C ≥ {BLOCK_CONFIDENCE}</span>
+                      <span className={ev.confidence >= BLOCK_CONFIDENCE ? "text-rose-300" : "text-slate-500"}>
+                        {ev.confidence.toFixed(2)} {ev.confidence >= BLOCK_CONFIDENCE ? "✓" : "✗"}
+                      </span>
+                    </div>
+                  </div>
+                </>
+              )}
+              <p className={`flex gap-1.5 text-xs leading-relaxed text-amber-100/90 ${hasJudgement ? "mt-3" : ""}`}>
                 <TriangleAlert className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-300" />
                 {action.reason}
               </p>
-            </section>
+            </Section>
 
-            <section className="rounded-lg border border-white/5 bg-slate-950/40 p-4">
-              <h3 className="mb-3 flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-slate-400">
-                <Cpu className="h-3.5 w-3.5" /> Sliding Window 特徴量
-              </h3>
-              <div className="space-y-3">
-                <FeatureRow label="ip_error_count_1m" display={String(ev.ip_error_count_1m)} norm={nErr} hint={`${SATURATION.ip_error_count_1m} で最大寄与`} />
-                <FeatureRow label="unique_denied_methods_5m" display={String(ev.unique_denied_methods_5m)} norm={nDenied} hint={`${SATURATION.unique_denied_methods_5m} で最大寄与`} />
-                <FeatureRow label="latency_spike_ratio" display={`×${ev.latency_spike_ratio.toFixed(2)}`} norm={nLatency} hint={`×${SATURATION.latency_spike_ratio} で最大寄与`} />
-              </div>
-            </section>
+            {hasJudgement && (
+              <Section title="Sliding Window 特徴量" icon={<Cpu className="h-3.5 w-3.5" />}>
+                <div className="space-y-3">
+                  <FeatureRow label="ip_error_count_1m" display={String(ev.ip_error_count_1m)} norm={nErr} hint={`${SATURATION.ip_error_count_1m} で最大寄与`} />
+                  <FeatureRow label="unique_denied_methods_5m" display={String(ev.unique_denied_methods_5m)} norm={nDenied} hint={`${SATURATION.unique_denied_methods_5m} で最大寄与`} />
+                  <FeatureRow label="latency_spike_ratio" display={`×${ev.latency_spike_ratio.toFixed(2)}`} norm={nLatency} hint={`×${SATURATION.latency_spike_ratio} で最大寄与`} />
+                </div>
+              </Section>
+            )}
           </div>
 
           <div className="space-y-4">
-            <section className="rounded-lg border border-white/5 bg-slate-950/40 p-4">
-              <h3 className="mb-3 text-xs font-semibold uppercase tracking-wider text-slate-400">最新の根拠シグナル</h3>
-              <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 font-mono text-xs">
-                {(
-                  [
-                    ["client_ip", ev.client_ip],
-                    ["user_id", ev.user_id || "—"],
-                    ["method", ev.method],
-                    ["source", ev.source_service || "—"],
-                    ["timestamp", ev.signal_timestamp || "—"],
-                    ["signal_id", action.signal_id || "—"],
-                  ] as const
-                ).map(([k, v]) => (
-                  <div key={k} className="contents">
-                    <dt className="text-slate-500">{k}</dt>
-                    <dd className="break-all text-slate-200">{v}</dd>
-                  </div>
-                ))}
-              </dl>
-            </section>
+            {hasJudgement && (
+              <Section title="最新の根拠シグナル">
+                <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 font-mono text-xs">
+                  {(
+                    [
+                      ["client_ip", ev.client_ip],
+                      ["user_id", ev.user_id || "—"],
+                      ["method", ev.method],
+                      ["source", ev.source_service || "—"],
+                      ["timestamp", ev.signal_timestamp || "—"],
+                      ["signal_id", action.signal_id || "—"],
+                    ] as const
+                  ).map(([k, v]) => (
+                    <div key={k} className="contents">
+                      <dt className="text-slate-500">{k}</dt>
+                      <dd className="break-all text-slate-200">{v}</dd>
+                    </div>
+                  ))}
+                </dl>
+              </Section>
+            )}
 
-            <section className="rounded-lg border border-white/5 bg-slate-950/40 p-4">
-              <h3 className="mb-2 flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-slate-400">
-                <Bot className="h-3.5 w-3.5" /> LLM 要因解析
-              </h3>
-              <p className="text-xs text-slate-500">LLM 解析はまだ接続されていません。上記の判定根拠と特徴量をもとに判断してください。</p>
-            </section>
+            <Section title="LLM 要因解析" icon={<Bot className="h-3.5 w-3.5" />} aside={<LlmProviderBadge llm={action.analysis} />}>
+              <LlmAnalysisView
+                llm={action.analysis}
+                emptyText={hasJudgement ? "この対象の LLM 分析はまだありません。判定根拠と特徴量をもとに判断してください。" : "管理者の起票のため LLM 分析はありません。"}
+              />
+            </Section>
 
-            <section className="rounded-lg border border-white/5 bg-slate-950/40 p-4">
-              <h3 className="mb-3 text-xs font-semibold uppercase tracking-wider text-slate-400">管理者の判断</h3>
+            <Section title="管理者の判断">
               {pending ? (
                 <div className="space-y-3">
+                  {action.irreversible && (
+                    <div className="rounded-md border border-rose-400/30 bg-rose-500/5 p-3 text-xs text-rose-100">
+                      <p className="font-semibold">取り消せない操作です。</p>
+                      <p className="mt-1 text-rose-100/80">
+                        承認すると、アプリへ「{actionLabel(action.proposed_action)}」の実行を依頼します。確認のため対象{" "}
+                        <code className="text-rose-50">{action.target}</code> を入力してください。
+                      </p>
+                      <input
+                        value={typedTarget}
+                        onChange={(e) => setTypedTarget(e.target.value)}
+                        placeholder={action.target}
+                        aria-label="確認のための対象の入力"
+                        className="mt-2 w-full rounded-md border border-rose-400/30 bg-slate-950/60 px-2.5 py-1.5 font-mono text-sm text-slate-100 placeholder:text-slate-600 focus:border-rose-400/60 focus:outline-none"
+                      />
+                    </div>
+                  )}
                   <label className="block text-xs text-slate-400">
                     担当者名 <span className="text-rose-300">*</span>
                     <input
@@ -212,13 +283,13 @@ export function ActionModal({ action, onClose, onDecided }: Props) {
                   {confirming && (
                     <p className="text-xs text-amber-200">
                       {confirming === "approve"
-                        ? `${action.target} を遮断します。もう一度「遮断を承認」を押すと確定します。`
+                        ? `${actionLabel(action.proposed_action)} (${action.target}) を実行します。もう一度「${approveLabel}」を押すと確定します。`
                         : "この提案を拒否します。もう一度「拒否」を押すと確定します。"}
                     </p>
                   )}
                 </div>
               ) : (
-                <div className="space-y-1 text-sm">
+                <div className="space-y-2 text-sm">
                   <div className="flex items-center gap-2">
                     <StatusChip status={action.status} />
                     <span className="text-slate-300">
@@ -226,11 +297,12 @@ export function ActionModal({ action, onClose, onDecided }: Props) {
                     </span>
                   </div>
                   {action.decision_note && <p className="text-xs text-slate-400">「{action.decision_note}」</p>}
+                  <ExecutionResult action={action} />
                   {!decidedHere && <p className="text-xs text-sky-300">他の管理者によって決定されました。</p>}
                 </div>
               )}
               {error && <p className="mt-2 text-xs text-rose-300">{error}</p>}
-            </section>
+            </Section>
           </div>
         </div>
 
@@ -247,13 +319,14 @@ export function ActionModal({ action, onClose, onDecided }: Props) {
             </button>
             <button
               onClick={() => submit("approve")}
-              disabled={!canSubmit}
+              disabled={!canSubmit || !targetConfirmed}
+              title={!targetConfirmed ? "確認のため対象を入力してください" : undefined}
               className={`inline-flex items-center gap-1.5 rounded-lg px-4 py-2 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-40 ${
                 confirming === "approve" ? "bg-rose-500 text-white ring-2 ring-rose-300" : "bg-rose-500/90 text-white hover:bg-rose-500"
               }`}
             >
               {submitting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}
-              {confirming === "approve" ? "遮断を確定" : "遮断を承認 (Approve)"}
+              {confirming === "approve" ? "実行を確定" : `${approveLabel} (Approve)`}
             </button>
           </footer>
         )}

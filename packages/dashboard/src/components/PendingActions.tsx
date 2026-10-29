@@ -1,9 +1,10 @@
-import { ChevronRight, Hourglass, PlugZap, UserCheck } from "lucide-react";
+import { ChevronRight, FilePlus2, Hourglass, PlugZap, UserCheck } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { PendingAction } from "../data/actionsApi";
 import type { ConnectionState } from "../data/useActions";
 import { fmtAgo } from "../lib/format";
-import { actionLabel, StatusChip } from "./ActionModal";
+import { IrreversibleBadge, SourceBadge, actionLabel } from "../lib/actions";
+import { StatusChip } from "./ActionModal";
 
 interface Props {
   pending: PendingAction[];
@@ -11,6 +12,7 @@ interface Props {
   connection: ConnectionState;
   error: string | undefined;
   onOpen: (a: PendingAction) => void;
+  onCreate: () => void;
 }
 
 function ConnectionPill({ state }: { state: ConnectionState }) {
@@ -27,7 +29,7 @@ function ConnectionPill({ state }: { state: ConnectionState }) {
   );
 }
 
-export function PendingActions({ pending, decided, connection, error, onOpen }: Props) {
+export function PendingActions({ pending, decided, connection, error, onOpen, onCreate }: Props) {
   // 経過時間表示の更新
   const [, tick] = useState(0);
   useEffect(() => {
@@ -49,9 +51,15 @@ export function PendingActions({ pending, decided, connection, error, onOpen }: 
         >
           {pending.length}
         </span>
-        <span className="text-xs text-slate-500">確信度不足で自動遮断を保留した判定 — 管理者の承認が必要です</span>
-        <span className="ml-auto">
+        <span className="hidden text-xs text-slate-500 xl:inline">Jev・LLM・管理者が提案した対処 — 承認されるまで実行されません</span>
+        <span className="ml-auto flex items-center gap-3">
           <ConnectionPill state={connection} />
+          <button
+            onClick={onCreate}
+            className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs text-slate-300 ring-1 ring-inset ring-white/10 hover:bg-white/5"
+          >
+            <FilePlus2 className="h-3.5 w-3.5" /> 起票
+          </button>
         </span>
       </header>
 
@@ -67,7 +75,7 @@ export function PendingActions({ pending, decided, connection, error, onOpen }: 
           {pending.length === 0 ? (
             <p className="px-4 py-3 text-xs text-slate-500">承認待ちのアクションはありません。</p>
           ) : (
-            <ul className="grid max-h-48 gap-2 overflow-auto p-3 md:grid-cols-2 xl:grid-cols-3">
+            <ul className="grid max-h-48 gap-2 overflow-auto p-3 md:grid-cols-2">
               {pending.map((a) => (
                 <li key={a.action_id}>
                   <button
@@ -80,18 +88,25 @@ export function PendingActions({ pending, decided, connection, error, onOpen }: 
                         <span className="rounded bg-rose-500/10 px-1.5 py-0.5 text-[10px] font-medium text-rose-300 ring-1 ring-inset ring-rose-400/30">
                           {actionLabel(a.proposed_action)}
                         </span>
+                        <SourceBadge source={a.source} />
+                        {a.irreversible && <IrreversibleBadge />}
                         {a.evidence.downgraded && (
                           <span className="rounded px-1.5 py-0.5 text-[10px] text-amber-200/80 ring-1 ring-inset ring-amber-400/30">4→3</span>
                         )}
                       </div>
                       <div className="mt-1 flex gap-3 font-mono text-[11px] text-slate-500">
-                        <span>
-                          S <span className="text-amber-300">{a.evidence.score.toFixed(2)}</span>
-                        </span>
-                        <span>
-                          C <span className="text-slate-300">{a.evidence.confidence.toFixed(2)}</span>
-                        </span>
-                        <span>{a.event_count} 件</span>
+                        {a.source !== "admin" && (
+                          <>
+                            <span>
+                              S <span className="text-amber-300">{a.evidence.score.toFixed(2)}</span>
+                            </span>
+                            <span>
+                              C <span className="text-slate-300">{a.evidence.confidence.toFixed(2)}</span>
+                            </span>
+                            <span>{a.event_count} 件</span>
+                          </>
+                        )}
+                        {a.analysis?.status === "done" && <span className="text-violet-300">LLM 分析あり</span>}
                         <span>{fmtAgo(a.updated_at)}</span>
                       </div>
                     </div>

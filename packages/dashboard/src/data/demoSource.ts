@@ -99,7 +99,7 @@ function mockAnalysis(e: DecisionEvent): LlmAnalysis {
         : e.level === 3
           ? "担当者による確認を推奨します。同一ユーザーの他セッションも確認してください。"
           : "経過観察。スコアが上昇した場合は再解析します。";
-  return { status: "done", model: "mock", summary, factors, recommendation };
+  return { status: "done", provider: "mock", summary, factors, recommendation };
 }
 
 export class DemoDataSource implements DataSource {
@@ -132,7 +132,7 @@ export class DemoDataSource implements DataSource {
         event.llm = { status: "pending" };
         const t = setTimeout(() => {
           timers.delete(t);
-          handlers.onLlmUpdate(signal.signal_id, mockAnalysis(event));
+          handlers.onLlmUpdate(signal.signal_id, ip, mockAnalysis(event));
         }, 1_200 + rand(1_800));
         timers.add(t);
       }
@@ -177,6 +177,7 @@ export class DemoDataSource implements DataSource {
       }
     };
 
+    handlers.onStatus?.("live");
     const interval = setInterval(tick, TICK_MS);
     return () => {
       clearInterval(interval);

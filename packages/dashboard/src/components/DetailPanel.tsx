@@ -1,4 +1,4 @@
-import { Bot, Cpu, Fingerprint, Loader2, MousePointerClick, ShieldCheck, TriangleAlert } from "lucide-react";
+import { Bot, Cpu, Fingerprint, MousePointerClick, ShieldCheck, TriangleAlert } from "lucide-react";
 import type { ReactNode } from "react";
 import { fmtTime } from "../lib/format";
 import {
@@ -12,7 +12,8 @@ import {
   SATURATION,
   normalizedFeatures,
 } from "../lib/jev";
-import type { DecisionEvent } from "../types";
+import type { DecisionEvent, LlmAnalysis } from "../types";
+import { LlmAnalysisView, LlmProviderBadge } from "./LlmAnalysisView";
 import { LEVEL_STYLE, LevelBadge } from "./LevelBadge";
 
 function Card({ title, icon, children, aside }: { title: string; icon: ReactNode; children: ReactNode; aside?: ReactNode }) {
@@ -107,7 +108,16 @@ export function FeatureRow({ label, display, norm, hint }: { label: string; disp
   );
 }
 
-export function DetailPanel({ event, isDemo }: { event: DecisionEvent | undefined; isDemo: boolean }) {
+export function DetailPanel({
+  event,
+  isDemo,
+  ipAnalysis,
+}: {
+  event: DecisionEvent | undefined;
+  isDemo: boolean;
+  /** 同じ送信元の直近の LLM 分析 (このシグナル自体の分析が無い場合に表示する)。 */
+  ipAnalysis?: LlmAnalysis | undefined;
+}) {
   if (!event) {
     return (
       <aside className="flex flex-col items-center justify-center gap-3 rounded-xl border border-dashed border-white/10 bg-slate-900/30 p-8 text-center text-sm text-slate-500">
@@ -160,45 +170,16 @@ export function DetailPanel({ event, isDemo }: { event: DecisionEvent | undefine
         </div>
       </Card>
 
-      <Card
-        title="LLM 要因解析"
-        icon={<Bot className="h-3.5 w-3.5" />}
-        aside={
-          event.llm?.model === "mock" ? (
-            <span className="rounded bg-violet-500/10 px-1.5 py-0.5 text-[10px] font-medium text-violet-300 ring-1 ring-inset ring-violet-400/30">
-              モック (LLM 未接続)
-            </span>
-          ) : undefined
-        }
-      >
-        {!event.llm ? (
-          <p className="text-xs text-slate-500">Level 1 のシグナルは LLM 解析の対象外です。</p>
-        ) : event.llm.status === "pending" ? (
-          <p className="flex items-center gap-2 text-xs text-slate-400">
-            <Loader2 className="h-3.5 w-3.5 animate-spin" /> 解析中…
-          </p>
-        ) : event.llm.status === "unavailable" ? (
-          <p className="text-xs text-slate-500">解析結果はありません。</p>
-        ) : (
-          <div className="space-y-3 text-sm">
-            <p className="leading-relaxed text-slate-200">{event.llm.summary}</p>
-            {event.llm.factors && (
-              <ul className="space-y-1.5">
-                {event.llm.factors.map((x) => (
-                  <li key={x} className="flex gap-2 text-xs leading-relaxed text-slate-400">
-                    <span className="mt-1.5 h-1 w-1 shrink-0 rounded-full bg-violet-400" />
-                    {x}
-                  </li>
-                ))}
-              </ul>
-            )}
-            {event.llm.recommendation && (
-              <div className="rounded-md border-l-2 border-violet-400/60 bg-violet-500/5 px-3 py-2 text-xs text-slate-300">
-                {event.llm.recommendation}
-              </div>
-            )}
-          </div>
-        )}
+      <Card title="LLM 要因解析" icon={<Bot className="h-3.5 w-3.5" />} aside={<LlmProviderBadge llm={event.llm ?? ipAnalysis} />}>
+        <LlmAnalysisView
+          llm={event.llm ?? ipAnalysis}
+          {...(!event.llm && ipAnalysis && { note: "同じ送信元についての直近の分析です" })}
+          emptyText={
+            event.level === 1
+              ? "Level 1 のシグナルは LLM 解析の対象外です。"
+              : "このシグナルの LLM 分析はありません (同じ送信元を直近に分析済み、または LLM が無効)。"
+          }
+        />
       </Card>
 
       <Card title="シグナル" icon={<Fingerprint className="h-3.5 w-3.5" />}>

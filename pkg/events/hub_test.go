@@ -37,11 +37,11 @@ func TestHub_BacklogAndDecisionShape(t *testing.T) {
 	for _, id := range []string{"s1", "s2", "s3", "s4"} {
 		h.PublishDecision(event(id, guardrail.Level1))
 	}
-	h.PublishAnalysis(event("s4", guardrail.Level2), approval.Analysis{Status: "done"}) // 分析は backlog に残さない
+	h.PublishAnalysis(event("s4", guardrail.Level2), approval.Analysis{Status: "done"}) // 分析も backlog に残す
 	backlog, _, cancel := h.Subscribe()
 	defer cancel()
-	if len(backlog) != 3 {
-		t.Fatalf("backlog = %d, want 3 (capped)", len(backlog))
+	if len(backlog) != 3 || backlog[2].Name != "analysis" {
+		t.Fatalf("backlog = %d (last %q), want 3 capped with the analysis last", len(backlog), backlog[len(backlog)-1].Name)
 	}
 	var d struct {
 		Signal struct {
@@ -54,7 +54,7 @@ func TestHub_BacklogAndDecisionShape(t *testing.T) {
 		Features map[string]float64 `json:"features"`
 	}
 	json.Unmarshal(backlog[0].Data, &d)
-	if backlog[0].Name != "decision" || d.Signal.SignalID != "s2" || d.Level != 1 {
+	if backlog[0].Name != "decision" || d.Signal.SignalID != "s3" || d.Level != 1 {
 		t.Errorf("oldest kept = %+v", d)
 	}
 	// ダッシュボードが参照する 0 値のフィールドも省略しない

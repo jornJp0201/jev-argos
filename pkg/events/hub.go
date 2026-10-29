@@ -4,7 +4,7 @@
 //	  event: decision  … 1 件の判定 (Level 1 を含む全件)
 //	  event: analysis  … LLM 分析の結果
 //
-// 接続直後に直近の判定 (Backlog 件) を送るため、ダッシュボードは開いた直後から概況を表示できる。
+// 接続直後に直近の判定と分析 (Backlog 件) を送るため、ダッシュボードは開いた直後から概況と分析結果を表示できる。
 // 受信が追いつかない購読者への配信は捨てる (判定の処理を遅らせないため)。
 package events
 
@@ -50,14 +50,14 @@ type AnalysisMessage struct {
 	Analysis approval.Analysis `json:"analysis"`
 }
 
-// DefaultBacklog は接続直後に送る直近の判定の件数。
+// DefaultBacklog は接続直後に送る直近の判定と分析の件数。
 const DefaultBacklog = 500
 
 // Hub は判定と分析の配信元。
 type Hub struct {
 	mu      sync.Mutex
 	subs    map[chan Message]struct{}
-	backlog []Message // 直近の判定 (古い順)
+	backlog []Message // 直近の判定と分析 (古い順)
 	size    int
 	logger  *slog.Logger
 }
@@ -105,7 +105,7 @@ func (h *Hub) PublishAnalysis(e receiver.Event, a approval.Analysis) {
 	if err != nil {
 		return
 	}
-	h.publish(Message{Name: "analysis", Data: data}, false)
+	h.publish(Message{Name: "analysis", Data: data}, true)
 }
 
 func (h *Hub) publish(m Message, keep bool) {
@@ -125,7 +125,7 @@ func (h *Hub) publish(m Message, keep bool) {
 	}
 }
 
-// Subscribe は直近の判定と、以降の配信を受け取るチャネルを返す。
+// Subscribe は直近の判定と分析と、以降の配信を受け取るチャネルを返す。
 func (h *Hub) Subscribe() (backlog []Message, updates <-chan Message, cancel func()) {
 	ch := make(chan Message, 1024)
 	h.mu.Lock()
