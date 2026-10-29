@@ -15,6 +15,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -25,6 +26,8 @@ import (
 	"github.com/jev-argos/jev-argos/pkg/approval"
 	"github.com/jev-argos/jev-argos/pkg/buffer"
 	"github.com/jev-argos/jev-argos/pkg/db"
+	"github.com/jev-argos/jev-argos/pkg/llm"
+	"github.com/jev-argos/jev-argos/pkg/notify"
 	"github.com/jev-argos/jev-argos/pkg/receiver"
 )
 
@@ -126,23 +129,23 @@ func newExecutor(cfg config, blocklist action.Blocklist) approval.Executor {
 // newEmitters は Level 2 以上のイベントの後続処理を組み立てる (receiver のワーカーで順に実行される)。
 //
 // [差し替えポイント] 判定後の処理を追加・削除する場合はここを変える (receiver.Emitter を実装して足す)。
-func newEmitters(ctx context.Context, cfg config, pool *pgxpool.Pool, actions approval.Store, blocklist action.Blocklist, logger *slog.Logger) (receiver.Emitters, error) {
+func newEmitters(cfg config, stores decisionStores, actions approval.Store, blocklist action.Blocklist, llmEmitter *llm.Emitter, logger *slog.Logger) receiver.Emitters {
 	emitters := receiver.Emitters{
 		receiver.LogEmitter{Logger: logger},
 		action.AutoBlockEmitter{Blocklist: blocklist, TTL: cfg.blockTTL, Logger: logger}, // Level 4 → 自動遮断
 		approval.ProposeEmitter{Store: actions, Logger: logger},                          // Level 3 → 承認キュー
 	}
-	if pool != nil {
-		store := db.NewPostgresStore(pool)
-		migrateCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		defer cancel()
-		if err := store.Migrate(migrateCtx); err != nil {
-			return nil, err
-		}
-		logger.Info("persisting decisions to postgres", "host", pool.Config().ConnConfig.Host)
-		emitters = append(emitters, db.Emitter{Store: store, Logger: logger})
+	if stores.decisions != nil {
+		emitters = append(emitters, db.Emitter{Store: stores.decisions, Logger: logger}) // Level 2〜4 → 判定ログ
 	}
-	return emitters, nil
+	if ns := newNotifiers(cfg); len(ns) > 0 {
+		emitters = append(emitters, &notify.Emitter{Notifiers: ns, DashboardURL: cfg.dashboardURL, Logger: logger}) // Level 3〜4 → 通知
+		logger.Info("alert notifications enabled", "notifiers", len(ns))
+	}
+	if llmEmitter != nil {
+		emitters = append(emitters, llmEmitter) // Level 2〜4 → LLM 分析 (専用のキューで非同期)
+	}
+	return emitters
 }
 
 // startAPI は管理 HTTP API を起動し、停止用の関数を返す。
@@ -182,4 +185,131 @@ func startAPI(cfg config, apiCfg api.Config, serveErr chan<- error, logger *slog
 		defer cancel()
 		_ = hs.Shutdown(shutdownCtx)
 	}, nil
+}
+
+// decisionStores は判定ログの保存先と、LLM 用の履歴の取得元。
+type decisionStores struct {
+	decisions db.DecisionStore   // nil なら保存しない
+	analyses  db.AnalysisStore   // nil なら保存しない
+	history   db.HistoryProvider // nil なら履歴を使わない
+	closers   []func()
+}
+
+// newDecisionStores は PostgreSQL があれば PostgreSQL、無ければ SQLite (指定時) を判定ログの保存先にする。
+// LLM の履歴は Safe View から読み、JEV_ARGOS_LLM_HISTORY_URL があればそのリードレプリカを使う (設計書 6.1)。
+func newDecisionStores(ctx context.Context, cfg config, pool *pgxpool.Pool, logger *slog.Logger) (decisionStores, error) {
+	var s decisionStores
+	switch {
+	case pool != nil:
+		store := db.NewPostgresStore(pool)
+		migrateCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		if err := store.Migrate(migrateCtx); err != nil {
+			return s, err
+		}
+		logger.Info("persisting decisions to postgres", "host", pool.Config().ConnConfig.Host)
+		s.decisions, s.analyses, s.history = store, store, db.PostgresHistory{Pool: pool}
+	case cfg.sqlitePath != "":
+		store, err := db.OpenSQLite(ctx, cfg.sqlitePath)
+		if err != nil {
+			return s, err
+		}
+		logger.Info("persisting decisions to sqlite", "path", cfg.sqlitePath)
+		s.decisions, s.analyses, s.history = store, store, store
+		s.closers = append(s.closers, func() { store.Close() })
+	default:
+		logger.Info("decision logs are not persisted (set JEV_ARGOS_POSTGRES_URL or JEV_ARGOS_SQLITE_PATH)")
+	}
+	if cfg.llmHistoryURL != "" {
+		replica, err := connectPostgres(ctx, cfg.llmHistoryURL)
+		if err != nil {
+			return s, fmt.Errorf("llm history replica: %w", err)
+		}
+		s.history = db.PostgresHistory{Pool: replica}
+		s.closers = append(s.closers, replica.Close)
+	}
+	return s, nil
+}
+
+func (s decisionStores) close() {
+	for _, c := range s.closers {
+		c()
+	}
+}
+
+// newLLMProvider は設定に応じた LLM を返す。"none" なら nil (LLM 分析を行わない)。
+//
+// [差し替えポイント] 他の LLM (OpenAI 等) を使う場合は llm.Provider を実装し、ここに case を足す。
+func newLLMProvider(ctx context.Context, cfg config, logger *slog.Logger) (llm.Provider, error) {
+	switch cfg.llmProvider {
+	case "none", "":
+		logger.Info("llm analysis disabled")
+		return nil, nil
+	case "ollama":
+		url := cfg.ollamaURL
+		if url != "" && !strings.Contains(url, "://") {
+			url = "http://" + url // OLLAMA_HOST は "127.0.0.1:11434" の形式のことがある
+		}
+		p := llm.OllamaProvider{BaseURL: url, Model: cfg.llmModel}
+		checkOllama(ctx, url, logger)
+		logger.Info("llm analysis enabled", "provider", p.Name())
+		return p, nil
+	case "anthropic":
+		p := llm.NewAnthropicProvider(cfg.llmModel) // API キーは ANTHROPIC_API_KEY など SDK の既定の方法で解決する
+		logger.Info("llm analysis enabled", "provider", p.Name())
+		return p, nil
+	}
+	return nil, fmt.Errorf("unknown JEV_ARGOS_LLM_PROVIDER %q (ollama | anthropic | none)", cfg.llmProvider)
+}
+
+// checkOllama は起動時に Ollama に接続できるかを確認し、できなければ警告だけ出す (起動は続ける)。
+func checkOllama(ctx context.Context, url string, logger *slog.Logger) {
+	if url == "" {
+		url = llm.DefaultOllamaURL
+	}
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(url, "/")+"/api/tags", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err == nil {
+		resp.Body.Close()
+		return
+	}
+	logger.Warn("ollama is not reachable; LLM analyses will fail until it is running (or set JEV_ARGOS_LLM_PROVIDER=none)", "url", url, "err", err)
+}
+
+// newMasker は LLM に送る前に IP・ユーザー ID を伏せるかを決める。
+func newMasker(cfg config, p llm.Provider) (llm.Masker, error) {
+	mask := false
+	switch cfg.llmMask {
+	case "auto", "":
+		mask = !p.Local() // 外部の LLM に送る場合だけ伏せる
+	case "always":
+		mask = true
+	case "never":
+	default:
+		return nil, fmt.Errorf("unknown JEV_ARGOS_LLM_MASK %q (auto | always | never)", cfg.llmMask)
+	}
+	if !mask {
+		return nil, nil
+	}
+	key := []byte(cfg.llmMaskKey)
+	if len(key) == 0 {
+		key = []byte(rand.Text()) // 起動ごとに変わる (仮名は再起動をまたいで一致しない)
+	}
+	return llm.HashMasker{Key: key}, nil
+}
+
+// newNotifiers は Level 3 以上の通知先を組み立てる。
+//
+// [差し替えポイント] 独自の通知先は notify.Notifier を実装してここに足す。
+func newNotifiers(cfg config) []notify.Notifier {
+	var ns []notify.Notifier
+	if cfg.slackWebhookURL != "" {
+		ns = append(ns, notify.SlackNotifier{WebhookURL: cfg.slackWebhookURL})
+	}
+	if cfg.alertWebhookURL != "" {
+		ns = append(ns, notify.WebhookNotifier{URL: cfg.alertWebhookURL, Secret: cfg.alertWebhookSecret})
+	}
+	return ns
 }

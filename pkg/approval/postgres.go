@@ -53,8 +53,10 @@ CREATE TABLE IF NOT EXISTS jev_actions (
     decided_by      TEXT        NOT NULL DEFAULT '',
     decision_note   TEXT        NOT NULL DEFAULT '',
     executed_at     TIMESTAMPTZ,
-    execution_error TEXT        NOT NULL DEFAULT ''
+    execution_error TEXT        NOT NULL DEFAULT '',
+    analysis        JSONB
 );
+ALTER TABLE jev_actions ADD COLUMN IF NOT EXISTS analysis JSONB;
 -- 同じ種類・対象の承認待ちは 1 件だけ (2 件目以降の提案は既存の件数と根拠を更新する)
 CREATE UNIQUE INDEX IF NOT EXISTS jev_actions_pending_key
     ON jev_actions (proposed_action, target) WHERE status = 'pending';
@@ -65,7 +67,7 @@ CREATE INDEX IF NOT EXISTS jev_actions_status_idx
 const (
 	notifyChannel     = "jev_argos_actions"
 	listLimit         = 1000
-	actionColumns     = `id, signal_id, proposed_action, target, reason, source, irreversible, status, evidence, event_count, created_at, updated_at, decided_at, decided_by, decision_note, executed_at, execution_error`
+	actionColumns     = `id, signal_id, proposed_action, target, reason, source, irreversible, status, evidence, event_count, created_at, updated_at, decided_at, decided_by, decision_note, executed_at, execution_error, analysis`
 	DefaultMaxPending = 5000 // 承認待ちの上限 (MemoryStore の DefaultMaxActions に相当)
 )
 
@@ -251,6 +253,29 @@ func (s *PostgresStore) RecordExecution(ctx context.Context, id string, execErr 
 	return a, err
 }
 
+func (s *PostgresStore) AttachAnalysis(ctx context.Context, actionType ActionType, target string, an Analysis) (Action, error) {
+	data, err := json.Marshal(an)
+	if err != nil {
+		return Action{}, err
+	}
+	var a Action
+	err = pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
+		var err error
+		a, err = scanAction(tx.QueryRow(ctx, `
+			UPDATE jev_actions SET analysis = $3, updated_at = $4
+			WHERE status = 'pending' AND proposed_action = $1 AND target = $2
+			RETURNING `+actionColumns, string(actionType), target, data, s.now()))
+		if err != nil {
+			return err
+		}
+		return notify(ctx, tx, a)
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Action{}, ErrNotFound
+	}
+	return a, err
+}
+
 func (s *PostgresStore) Subscribe() (<-chan Action, func()) {
 	ch := make(chan Action, 64)
 	s.mu.Lock()
@@ -298,9 +323,10 @@ func scanAction(row pgx.Row) (Action, error) {
 		proposed, status     string
 		evidence             []byte
 		decidedAt, executeAt *time.Time
+		analysis             []byte
 	)
 	err := row.Scan(&a.ID, &a.SignalID, &proposed, &a.Target, &a.Reason, &a.Source, &a.Irreversible, &status, &evidence,
-		&a.EventCount, &a.CreatedAt, &a.UpdatedAt, &decidedAt, &a.DecidedBy, &a.DecisionNote, &executeAt, &a.ExecutionError)
+		&a.EventCount, &a.CreatedAt, &a.UpdatedAt, &decidedAt, &a.DecidedBy, &a.DecisionNote, &executeAt, &a.ExecutionError, &analysis)
 	if err != nil {
 		return Action{}, err
 	}
@@ -308,6 +334,12 @@ func scanAction(row pgx.Row) (Action, error) {
 	a.DecidedAt, a.ExecutedAt = decidedAt, executeAt
 	if err := json.Unmarshal(evidence, &a.Evidence); err != nil {
 		return Action{}, fmt.Errorf("decode evidence of %s: %w", a.ID, err)
+	}
+	if len(analysis) > 0 {
+		a.Analysis = new(Analysis)
+		if err := json.Unmarshal(analysis, a.Analysis); err != nil {
+			return Action{}, fmt.Errorf("decode analysis of %s: %w", a.ID, err)
+		}
 	}
 	return a, nil
 }

@@ -21,6 +21,26 @@ type config struct {
 	blockTTL            time.Duration
 	actionWebhookURL    string
 	actionWebhookSecret string
+
+	// 判定ログ (pkg/db)
+	sqlitePath string
+
+	// LLM 分析 (pkg/llm)
+	llmProvider   string // "ollama" (既定) | "anthropic" | "none"
+	llmModel      string
+	ollamaURL     string
+	llmMask       string // "auto" (既定: 外部の LLM のときだけ伏せる) | "always" | "never"
+	llmMaskKey    string
+	llmHistoryURL string // Safe View を読む分析専用のリードレプリカ (任意)
+
+	// 通知 (pkg/notify)
+	slackWebhookURL    string
+	alertWebhookURL    string
+	alertWebhookSecret string
+	dashboardURL       string
+
+	// HTTP でのシグナル受信 (pkg/receiver)
+	ingestToken string
 }
 
 // envOr は環境変数 key が設定されていればその値 (空文字を含む)、無ければ def を返す。
@@ -56,6 +76,18 @@ func parseConfig() (cfg config, healthcheck bool) {
 	flag.DurationVar(&cfg.blockTTL, "block-ttl", envDuration("JEV_ARGOS_BLOCK_TTL", 15*time.Minute), "duration of automatic / approved IP blocks (or JEV_ARGOS_BLOCK_TTL)")
 	flag.StringVar(&cfg.actionWebhookURL, "action-webhook-url", os.Getenv("JEV_ARGOS_ACTION_WEBHOOK_URL"), "URL that receives approved non-IP actions (session revoke, account suspend, ...)")
 	flag.StringVar(&cfg.actionWebhookSecret, "action-webhook-secret", os.Getenv("JEV_ARGOS_ACTION_WEBHOOK_SECRET"), "HMAC secret for signing action webhooks")
+	flag.StringVar(&cfg.sqlitePath, "sqlite-path", os.Getenv("JEV_ARGOS_SQLITE_PATH"), "SQLite file for decision logs (development; ignored when PostgreSQL is set)")
+	flag.StringVar(&cfg.llmProvider, "llm-provider", envOr("JEV_ARGOS_LLM_PROVIDER", "ollama"), "LLM for deep analysis: ollama | anthropic | none")
+	flag.StringVar(&cfg.llmModel, "llm-model", os.Getenv("JEV_ARGOS_LLM_MODEL"), "LLM model name (default depends on the provider)")
+	flag.StringVar(&cfg.ollamaURL, "ollama-url", envOr("JEV_ARGOS_OLLAMA_URL", os.Getenv("OLLAMA_HOST")), "Ollama URL (default http://localhost:11434)")
+	flag.StringVar(&cfg.llmMask, "llm-mask", envOr("JEV_ARGOS_LLM_MASK", "auto"), "mask IP / user id before sending to the LLM: auto | always | never")
+	flag.StringVar(&cfg.llmMaskKey, "llm-mask-key", os.Getenv("JEV_ARGOS_LLM_MASK_KEY"), "key for pseudonymizing IP / user id (random per process if empty)")
+	flag.StringVar(&cfg.llmHistoryURL, "llm-history-url", os.Getenv("JEV_ARGOS_LLM_HISTORY_URL"), "PostgreSQL URL (read replica) for the LLM's history lookups via the safe view")
+	flag.StringVar(&cfg.slackWebhookURL, "slack-webhook-url", os.Getenv("JEV_ARGOS_SLACK_WEBHOOK_URL"), "Slack incoming webhook for Level 3+ alerts")
+	flag.StringVar(&cfg.alertWebhookURL, "alert-webhook-url", os.Getenv("JEV_ARGOS_ALERT_WEBHOOK_URL"), "generic webhook for Level 3+ alerts (JSON, signed)")
+	flag.StringVar(&cfg.alertWebhookSecret, "alert-webhook-secret", os.Getenv("JEV_ARGOS_ALERT_WEBHOOK_SECRET"), "HMAC secret for alert webhooks")
+	flag.StringVar(&cfg.dashboardURL, "dashboard-url", os.Getenv("JEV_ARGOS_DASHBOARD_URL"), "dashboard URL included in alerts")
+	flag.StringVar(&cfg.ingestToken, "ingest-token", os.Getenv("JEV_ARGOS_INGEST_TOKEN"), "bearer token for HTTP signal ingestion (POST /api/signals); disabled if empty")
 	flag.Parse()
 
 	// デモは既定で空きポートのローカルのみで受け付ける。アドレスを明示すればそのアドレスで待ち受ける (コンテナ用)

@@ -7,14 +7,18 @@ package db
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"google.golang.org/protobuf/encoding/protojson"
 
 	jevargosv1 "github.com/jev-argos/jev-argos/gen/v1"
+	"github.com/jev-argos/jev-argos/pkg/approval"
 	"github.com/jev-argos/jev-argos/pkg/guardrail"
 	"github.com/jev-argos/jev-argos/pkg/receiver"
 )
@@ -42,6 +46,27 @@ CREATE INDEX IF NOT EXISTS jev_decision_logs_client_ip_idx
     ON jev_decision_logs (client_ip, received_at DESC);
 CREATE INDEX IF NOT EXISTS jev_decision_logs_level_idx
     ON jev_decision_logs (level, received_at DESC);
+
+-- LLM 分析の結果 (pkg/llm)
+ALTER TABLE jev_decision_logs ADD COLUMN IF NOT EXISTS llm_analysis JSONB;
+
+-- LLM が参照してよい列だけを公開するビュー (設計書 6.1 "Safe View")。
+-- user_id・User-Agent・元のシグナル (raw_signal_json) を含めない。
+--
+-- [差し替えポイント] 本番では LLM 用の DB ユーザーを作り、このビューの SELECT だけを許可すること:
+--   CREATE ROLE jev_argos_llm LOGIN PASSWORD '...';
+--   GRANT SELECT ON jev_decision_logs_safe TO jev_argos_llm;
+-- その接続先を JEV_ARGOS_LLM_HISTORY_URL (分析専用のリードレプリカ) に指定する。
+CREATE OR REPLACE VIEW jev_decision_logs_safe AS
+SELECT received_at,
+       client_ip,
+       raw_signal_json -> 'request_context' ->> 'method'                         AS method,
+       COALESCE((raw_signal_json -> 'response_context' ->> 'status_code')::int, 0) AS status_code,
+       level,
+       risk_score,
+       confidence,
+       downgraded
+FROM jev_decision_logs;
 `
 
 const insertSQL = `
@@ -101,6 +126,30 @@ type DecisionStore interface {
 	SaveDecision(ctx context.Context, log DecisionLog) error
 }
 
+// AnalysisStore は LLM 分析の結果を判定ログに保存する。
+type AnalysisStore interface {
+	SaveAnalysis(ctx context.Context, signalID string, a approval.Analysis) error
+}
+
+// HistoryEntry は LLM に渡す過去の判定 1 件 (Safe View の列だけ)。
+type HistoryEntry struct {
+	At         time.Time `json:"at"`
+	Method     string    `json:"method"`
+	StatusCode int       `json:"status_code"`
+	Level      int       `json:"level"`
+	Score      float64   `json:"score"`
+	Confidence float64   `json:"confidence"`
+	Downgraded bool      `json:"downgraded"`
+}
+
+// HistoryProvider は同じ送信元の過去の判定を返す (LLM 分析の文脈として使う)。
+type HistoryProvider interface {
+	RecentByIP(ctx context.Context, clientIP string, limit int) ([]HistoryEntry, error)
+}
+
+// DefaultHistoryTimeout は履歴の問い合わせの上限時間 (設計書 6.1: 最大 2 秒)。
+const DefaultHistoryTimeout = 2 * time.Second
+
 // PostgresStore は PostgreSQL に判定ログを保存する DecisionStore。
 type PostgresStore struct {
 	db Execer
@@ -117,6 +166,18 @@ func NewPostgresStore(db Execer) *PostgresStore {
 func (s *PostgresStore) Migrate(ctx context.Context) error {
 	if _, err := s.db.Exec(ctx, Schema); err != nil {
 		return fmt.Errorf("migrate jev_decision_logs: %w", err)
+	}
+	return nil
+}
+
+// SaveAnalysis は判定ログに LLM 分析を保存する。判定ログがまだ無ければ何もしない。
+func (s *PostgresStore) SaveAnalysis(ctx context.Context, signalID string, a approval.Analysis) error {
+	data, err := json.Marshal(a)
+	if err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(ctx, `UPDATE jev_decision_logs SET llm_analysis = $2 WHERE signal_id = $1`, signalID, data); err != nil {
+		return fmt.Errorf("save analysis (signal_id=%q): %w", signalID, err)
 	}
 	return nil
 }
@@ -173,4 +234,53 @@ func (em Emitter) Emit(ctx context.Context, e receiver.Event) {
 		}
 		logger.Error("persist decision failed", "signal_id", e.Signal.GetSignalId(), "err", err)
 	}
+}
+
+// PostgresHistory は Safe View から過去の判定を読む HistoryProvider (設計書 6.1)。
+//
+//   - 読み取り専用トランザクションで実行する (誤って書き込むことはない)。
+//   - statement_timeout で問い合わせ時間に上限を設け、LLM 経由の処理が DB を圧迫しないようにする。
+//   - Pool には分析専用のリードレプリカへの接続を渡すことを推奨する (本番 DB の負荷を避けるため)。
+type PostgresHistory struct {
+	Pool    *pgxpool.Pool
+	Timeout time.Duration // 0 なら DefaultHistoryTimeout
+}
+
+var _ HistoryProvider = PostgresHistory{}
+
+func (h PostgresHistory) RecentByIP(ctx context.Context, clientIP string, limit int) ([]HistoryEntry, error) {
+	timeout := h.Timeout
+	if timeout <= 0 {
+		timeout = DefaultHistoryTimeout
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout+500*time.Millisecond)
+	defer cancel()
+
+	var out []HistoryEntry
+	err := pgx.BeginTxFunc(ctx, h.Pool, pgx.TxOptions{AccessMode: pgx.ReadOnly}, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, fmt.Sprintf("SET LOCAL statement_timeout = %d", timeout.Milliseconds())); err != nil {
+			return err
+		}
+		rows, err := tx.Query(ctx, `
+			SELECT received_at, COALESCE(method, ''), status_code, level, risk_score, confidence, downgraded
+			FROM jev_decision_logs_safe WHERE client_ip = $1 ORDER BY received_at DESC LIMIT $2`, clientIP, limit)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var e HistoryEntry
+			var level int16
+			if err := rows.Scan(&e.At, &e.Method, &e.StatusCode, &level, &e.Score, &e.Confidence, &e.Downgraded); err != nil {
+				return err
+			}
+			e.Level = int(level)
+			out = append(out, e)
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		return nil, fmt.Errorf("history (safe view): %w", err)
+	}
+	return out, nil
 }

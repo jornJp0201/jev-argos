@@ -56,16 +56,20 @@ type Options struct {
 	QueueSize int // Emitter へのキュー長。満杯時はイベントを捨てる (既定 1024)
 	Workers   int // Emitter を呼ぶワーカー数 (既定 4)
 	Logger    *slog.Logger
+	// Observer は Level 1 を含むすべての判定で同期的に呼ばれる (例: ダッシュボードへの配信)。
+	// 判定の応答を遅らせないよう、すぐに戻ること。
+	Observer func(Event)
 }
 
 // Server は SignalService の実装。
 type Server struct {
 	jevargosv1.UnimplementedSignalServiceServer
 
-	buf     buffer.Buffer
-	cls     *classifier.Classifier
-	emitter Emitter
-	logger  *slog.Logger
+	buf      buffer.Buffer
+	cls      *classifier.Classifier
+	emitter  Emitter
+	observer func(Event)
+	logger   *slog.Logger
 
 	mu      sync.RWMutex // closed と events の close を保護する
 	closed  bool
@@ -89,11 +93,12 @@ func NewServer(buf buffer.Buffer, cls *classifier.Classifier, emitter Emitter, o
 		opts.Logger = slog.Default()
 	}
 	s := &Server{
-		buf:     buf,
-		cls:     cls,
-		emitter: emitter,
-		logger:  opts.Logger,
-		events:  make(chan Event, opts.QueueSize),
+		buf:      buf,
+		cls:      cls,
+		emitter:  emitter,
+		observer: opts.Observer,
+		logger:   opts.Logger,
+		events:   make(chan Event, opts.QueueSize),
 	}
 	for range opts.Workers {
 		s.workers.Add(1)
@@ -159,6 +164,9 @@ func (s *Server) Evaluate(ctx context.Context, signal *jevargosv1.SecuritySignal
 		Features:   features,
 		Assessment: assessment,
 		Decision:   guardrail.Decide(assessment),
+	}
+	if s.observer != nil {
+		s.observer(e)
 	}
 	if e.Decision.Level >= guardrail.Level2 {
 		s.dispatch(e)

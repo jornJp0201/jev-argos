@@ -95,6 +95,20 @@ type Evidence struct {
 	SignalTimestamp       string  `json:"signal_timestamp"`
 }
 
+// Analysis は LLM による要因分析の結果 (pkg/llm が作る)。
+type Analysis struct {
+	Status            string     `json:"status"`   // "done" | "failed"
+	Provider          string     `json:"provider"` // 例: "ollama/llama3.2"
+	Masked            bool       `json:"masked"`   // IP・ユーザー ID を伏せて送ったか
+	Summary           string     `json:"summary,omitempty"`
+	Factors           []string   `json:"factors,omitempty"`
+	Recommendation    string     `json:"recommendation,omitempty"`
+	RecommendedAction ActionType `json:"recommended_action,omitempty"` // 空なら推奨なし
+	Error             string     `json:"error,omitempty"`
+	SignalID          string     `json:"signal_id"`
+	AnalyzedAt        time.Time  `json:"analyzed_at"`
+}
+
 // Action は承認待ちアクション。
 type Action struct {
 	ID             string     `json:"action_id"`
@@ -115,6 +129,8 @@ type Action struct {
 	// 承認後の実行結果。ExecutedAt が nil なら未実行 (拒否・実行待ち)。
 	ExecutedAt     *time.Time `json:"executed_at,omitempty"`
 	ExecutionError string     `json:"execution_error,omitempty"`
+	// Analysis は同じ対象についての最新の LLM 分析 (無ければ nil)。
+	Analysis *Analysis `json:"analysis,omitempty"`
 }
 
 // Proposal は新しいアクションの提案。
@@ -145,6 +161,9 @@ type Store interface {
 	Decide(ctx context.Context, id string, approve bool, decidedBy, note string) (Action, error)
 	// RecordExecution は承認されたアクションの実行結果を記録する (execErr が nil なら成功)。
 	RecordExecution(ctx context.Context, id string, execErr error) (Action, error)
+	// AttachAnalysis は種類・対象が一致する承認待ちのアクションに LLM 分析を付ける。
+	// 該当する承認待ちが無ければ ErrNotFound。
+	AttachAnalysis(ctx context.Context, actionType ActionType, target string, a Analysis) (Action, error)
 	// Subscribe はアクションの作成・更新の通知を受け取るチャネルを返す。cancel で購読を解除する。
 	Subscribe() (updates <-chan Action, cancel func())
 }
@@ -293,6 +312,21 @@ func (s *MemoryStore) RecordExecution(_ context.Context, id string, execErr erro
 	return *a, nil
 }
 
+func (s *MemoryStore) AttachAnalysis(_ context.Context, actionType ActionType, target string, an Analysis) (Action, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	id, ok := s.pendingKeys[pendingKey(actionType, target)]
+	if !ok {
+		return Action{}, ErrNotFound
+	}
+	a := s.actions[id]
+	a.Analysis = &an
+	a.UpdatedAt = s.now()
+	s.notify(*a)
+	return *a, nil
+}
+
 func sourceOrDefault(s string) string {
 	if s == "" {
 		return SourceJev
@@ -364,26 +398,12 @@ func (em ProposeEmitter) Emit(ctx context.Context, e receiver.Event) {
 	if e.Decision.Level != guardrail.Level3 {
 		return
 	}
-	ip := e.Signal.GetUserContext().GetClientIp()
 	_, err := em.Store.Propose(ctx, Proposal{
 		SignalID:       e.Signal.GetSignalId(),
 		ProposedAction: ActionBlockIP,
-		Target:         ip,
+		Target:         e.Signal.GetUserContext().GetClientIp(),
 		Reason:         reason(e),
-		Evidence: Evidence{
-			Score:                 e.Assessment.Score,
-			Confidence:            e.Assessment.Confidence,
-			Level:                 int(e.Decision.Level),
-			Downgraded:            e.Decision.Downgraded,
-			IPErrorCount1m:        e.Features.IPErrorCount1m,
-			UniqueDeniedMethods5m: e.Features.UniqueDeniedMethods5m,
-			LatencySpikeRatio:     e.Features.LatencySpikeRatio,
-			ClientIP:              ip,
-			UserID:                e.Signal.GetUserContext().GetUserId(),
-			Method:                e.Signal.GetRequestContext().GetMethod(),
-			SourceService:         e.Signal.GetSourceService(),
-			SignalTimestamp:       e.Signal.GetTimestamp(),
-		},
+		Evidence:       EvidenceFromEvent(e),
 	})
 	if err != nil {
 		logger := em.Logger
@@ -391,6 +411,24 @@ func (em ProposeEmitter) Emit(ctx context.Context, e receiver.Event) {
 			logger = slog.Default()
 		}
 		logger.Error("propose action failed", "signal_id", e.Signal.GetSignalId(), "err", err)
+	}
+}
+
+// EvidenceFromEvent は判定結果から根拠のスナップショットを作る。
+func EvidenceFromEvent(e receiver.Event) Evidence {
+	return Evidence{
+		Score:                 e.Assessment.Score,
+		Confidence:            e.Assessment.Confidence,
+		Level:                 int(e.Decision.Level),
+		Downgraded:            e.Decision.Downgraded,
+		IPErrorCount1m:        e.Features.IPErrorCount1m,
+		UniqueDeniedMethods5m: e.Features.UniqueDeniedMethods5m,
+		LatencySpikeRatio:     e.Features.LatencySpikeRatio,
+		ClientIP:              e.Signal.GetUserContext().GetClientIp(),
+		UserID:                e.Signal.GetUserContext().GetUserId(),
+		Method:                e.Signal.GetRequestContext().GetMethod(),
+		SourceService:         e.Signal.GetSourceService(),
+		SignalTimestamp:       e.Signal.GetTimestamp(),
 	}
 }
 

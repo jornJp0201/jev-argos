@@ -182,7 +182,7 @@ func TestPostgresStore_Integration(t *testing.T) {
 	}
 	defer pool.Close()
 
-	if _, err := pool.Exec(ctx, "DROP TABLE IF EXISTS jev_decision_logs"); err != nil {
+	if _, err := pool.Exec(ctx, "DROP TABLE IF EXISTS jev_decision_logs CASCADE"); err != nil {
 		t.Fatal(err)
 	}
 	store := NewPostgresStore(pool)

@@ -1,23 +1,17 @@
 package action
 
 import (
-	"bytes"
 	"context"
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
-	"strconv"
 	"time"
 
 	"github.com/jev-argos/jev-argos/pkg/approval"
 	"github.com/jev-argos/jev-argos/pkg/guardrail"
 	"github.com/jev-argos/jev-argos/pkg/receiver"
+	"github.com/jev-argos/jev-argos/pkg/webhook"
 )
 
 // BlocklistExecutor は承認された block_ip を遮断リストに登録する approval.Executor。
@@ -64,7 +58,7 @@ func (x BlocklistExecutor) Execute(ctx context.Context, a approval.Action) error
 //	{"type": "action.approved", "action": { ...approval.Action の JSON... }}
 //
 // 受信側は署名とタイムスタンプ (例: 5 分以内) を検証し、2xx を返すこと。2xx 以外は実行失敗として記録される。
-// 署名の検証は VerifySignature (Go) を参考にする。
+// 署名の検証は pkg/webhook の Verify / VerifyRequest (Go) を参考にする。
 type WebhookExecutor struct {
 	URL    string
 	Secret string // HMAC 署名の鍵。空なら署名しない (本番では必ず設定すること)
@@ -82,65 +76,11 @@ func (x WebhookExecutor) Execute(ctx context.Context, a approval.Action) error {
 	if x.URL == "" {
 		return errors.New("webhook executor: URL is not configured (set JEV_ARGOS_ACTION_WEBHOOK_URL)")
 	}
-	return postSigned(ctx, x.Client, x.URL, x.Secret, x.Now, WebhookPayload{Type: "action.approved", Action: a})
-}
-
-// postSigned は JSON を署名付きで POST する。
-func postSigned(ctx context.Context, client *http.Client, url, secret string, now func() time.Time, payload any) error {
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return err
+	now := time.Now
+	if x.Now != nil {
+		now = x.Now
 	}
-	if client == nil {
-		client = &http.Client{Timeout: 5 * time.Second}
-	}
-	if now == nil {
-		now = time.Now
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", "jev-argos")
-	if secret != "" {
-		ts := strconv.FormatInt(now().Unix(), 10)
-		req.Header.Set("X-Jev-Argos-Timestamp", ts)
-		req.Header.Set("X-Jev-Argos-Signature", "sha256="+Sign(secret, ts, body))
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("webhook %s: %w", url, err)
-	}
-	defer resp.Body.Close()
-	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
-	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return fmt.Errorf("webhook %s: HTTP %d", url, resp.StatusCode)
-	}
-	return nil
-}
-
-// Sign は Webhook の署名 (hex(HMAC-SHA256(secret, timestamp + "." + body))) を返す。
-func Sign(secret, timestamp string, body []byte) string {
-	mac := hmac.New(sha256.New, []byte(secret))
-	mac.Write([]byte(timestamp))
-	mac.Write([]byte("."))
-	mac.Write(body)
-	return hex.EncodeToString(mac.Sum(nil))
-}
-
-// VerifySignature は Webhook の受信側で署名とタイムスタンプを検証する。
-// maxAge より古いリクエストは再送攻撃とみなして拒否する。
-func VerifySignature(secret, timestamp, signature string, body []byte, now time.Time, maxAge time.Duration) bool {
-	ts, err := strconv.ParseInt(timestamp, 10, 64)
-	if err != nil {
-		return false
-	}
-	if d := now.Sub(time.Unix(ts, 0)); d > maxAge || d < -maxAge {
-		return false
-	}
-	want := "sha256=" + Sign(secret, timestamp, body)
-	return hmac.Equal([]byte(signature), []byte(want))
+	return webhook.Post(ctx, x.Client, x.URL, x.Secret, now(), WebhookPayload{Type: "action.approved", Action: a})
 }
 
 // Router はアクションの種類ごとに Executor を振り分ける approval.Executor。

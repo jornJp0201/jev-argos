@@ -47,6 +47,11 @@ type Config struct {
 	Executor approval.Executor // nil なら approval.LogExecutor
 	// Blocklist を指定すると /api/blocklist を有効にする。
 	Blocklist action.Blocklist
+	// Routes は管理 API の認証 (AdminToken) の内側に追加するエンドポイント (例: "GET /api/events/stream")。
+	Routes map[string]http.HandlerFunc
+	// PublicRoutes は管理 API の認証を通さずに追加するエンドポイント。ハンドラー自身で認証すること
+	// (例: 送信専用トークンで守るシグナル受信 "POST /api/signals")。
+	PublicRoutes map[string]http.Handler
 	// AdminToken は管理 API の Bearer トークン。空にはできない。
 	AdminToken string
 	Logger     *slog.Logger
@@ -84,6 +89,12 @@ func NewHandler(cfg Config) (http.Handler, error) {
 	mux.Handle("GET /api/actions/{id}", h.auth(h.get))
 	mux.Handle("POST /api/actions/{id}/approve", h.auth(h.decide(true)))
 	mux.Handle("POST /api/actions/{id}/reject", h.auth(h.decide(false)))
+	for pattern, fn := range cfg.Routes {
+		mux.Handle(pattern, h.auth(fn))
+	}
+	for pattern, handler := range cfg.PublicRoutes {
+		mux.Handle(pattern, handler)
+	}
 	if h.blocklist != nil {
 		mux.Handle("GET /api/blocklist", h.auth(h.listBlocks))
 		mux.Handle("POST /api/blocklist", h.auth(h.block))
@@ -94,13 +105,6 @@ func NewHandler(cfg Config) (http.Handler, error) {
 }
 
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) { h.mux.ServeHTTP(w, r) }
-
-// Handle は管理 API に認証付きのエンドポイントを追加する (他パッケージの API を同じサーバーに載せるため)。
-func Handle(api http.Handler, pattern string, h http.HandlerFunc) {
-	if hh, ok := api.(*handler); ok {
-		hh.mux.Handle(pattern, hh.auth(h))
-	}
-}
 
 // decodeJSON はリクエストボディを v に読み込む。未知のフィールドは拒否する。
 func decodeJSON(w http.ResponseWriter, r *http.Request, v any) bool {
@@ -261,7 +265,7 @@ func (h *handler) decide(approve bool) http.HandlerFunc {
 func (h *handler) stream(w http.ResponseWriter, r *http.Request) {
 	updates, cancel := h.store.Subscribe()
 	defer cancel()
-	ServeSSE(w, r, h.logger, func(a approval.Action) (string, any) { return "action", a }, updates)
+	ServeSSE(w, r, h.logger, func(a approval.Action) (string, any) { return "action", a }, nil, updates)
 }
 
 type blockRequest struct {
@@ -354,12 +358,12 @@ func (h *handler) streamBlocks(w http.ResponseWriter, r *http.Request) {
 			kind = "removed"
 		}
 		return "block", blockEvent{Kind: kind, Entry: ev.Entry}
-	}, events)
+	}, nil, events)
 }
 
-// ServeSSE は updates を Server-Sent Events として配信する。encode は (イベント名, データ) を返す。
-// クライアントの切断か updates のクローズで終了する。
-func ServeSSE[T any](w http.ResponseWriter, r *http.Request, logger *slog.Logger, encode func(T) (string, any), updates <-chan T) {
+// ServeSSE は initial を送った後、updates を Server-Sent Events として配信する。
+// encode は (イベント名, データ) を返す。クライアントの切断か updates のクローズで終了する。
+func ServeSSE[T any](w http.ResponseWriter, r *http.Request, logger *slog.Logger, encode func(T) (string, any), initial []T, updates <-chan T) {
 	rc := http.NewResponseController(w)
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -375,6 +379,20 @@ func ServeSSE[T any](w http.ResponseWriter, r *http.Request, logger *slog.Logger
 	if !write(": connected\n\n") {
 		return
 	}
+	send := func(u T) bool {
+		name, v := encode(u)
+		data, err := json.Marshal(v)
+		if err != nil {
+			logger.Error("marshal sse event", "err", err)
+			return true
+		}
+		return write("event: " + name + "\ndata: " + string(data) + "\n\n")
+	}
+	for _, u := range initial {
+		if !send(u) {
+			return
+		}
+	}
 
 	heartbeat := time.NewTicker(sseHeartbeat)
 	defer heartbeat.Stop()
@@ -387,16 +405,7 @@ func ServeSSE[T any](w http.ResponseWriter, r *http.Request, logger *slog.Logger
 				return
 			}
 		case u, ok := <-updates:
-			if !ok {
-				return
-			}
-			name, v := encode(u)
-			data, err := json.Marshal(v)
-			if err != nil {
-				logger.Error("marshal sse event", "err", err)
-				continue
-			}
-			if !write("event: " + name + "\ndata: " + string(data) + "\n\n") {
+			if !ok || !send(u) {
 				return
 			}
 		}

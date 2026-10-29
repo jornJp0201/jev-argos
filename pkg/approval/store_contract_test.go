@@ -100,6 +100,28 @@ func runStoreContract(t *testing.T, newStore func(t *testing.T) Store) {
 		}
 	})
 
+	t.Run("AttachAnalysis", func(t *testing.T) {
+		s := newStore(t)
+		if _, err := s.AttachAnalysis(ctx, ActionBlockIP, "10.0.0.1", Analysis{Status: "done"}); !errors.Is(err, ErrNotFound) {
+			t.Errorf("no pending action: %v", err)
+		}
+		a, _ := s.Propose(ctx, p("10.0.0.1", "s1"))
+		got, err := s.AttachAnalysis(ctx, ActionBlockIP, "10.0.0.1", Analysis{
+			Status: "done", Provider: "ollama/test", Summary: "probing", Factors: []string{"f1"},
+			RecommendedAction: ActionBlockIP, SignalID: "s1", AnalyzedAt: time.Now().UTC().Truncate(time.Millisecond),
+		})
+		if err != nil || got.ID != a.ID || got.Analysis == nil || got.Analysis.Summary != "probing" || len(got.Analysis.Factors) != 1 {
+			t.Fatalf("attach = %+v, %v", got, err)
+		}
+		if reloaded, _ := s.Get(ctx, a.ID); reloaded.Analysis == nil || reloaded.Analysis.RecommendedAction != ActionBlockIP {
+			t.Errorf("reloaded = %+v", reloaded.Analysis)
+		}
+		s.Decide(ctx, a.ID, false, "alice", "")
+		if _, err := s.AttachAnalysis(ctx, ActionBlockIP, "10.0.0.1", Analysis{}); !errors.Is(err, ErrNotFound) {
+			t.Errorf("decided action must not get analysis: %v", err)
+		}
+	})
+
 	t.Run("Subscribe", func(t *testing.T) {
 		s := newStore(t)
 		updates, cancel := s.Subscribe()

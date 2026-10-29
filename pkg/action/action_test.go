@@ -23,6 +23,7 @@ import (
 	"github.com/jev-argos/jev-argos/pkg/classifier"
 	"github.com/jev-argos/jev-argos/pkg/guardrail"
 	"github.com/jev-argos/jev-argos/pkg/receiver"
+	"github.com/jev-argos/jev-argos/pkg/webhook"
 )
 
 var ctx = context.Background()
@@ -186,7 +187,7 @@ func TestWebhookExecutor_SignsAndVerifies(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		ts, sig := r.Header.Get("X-Jev-Argos-Timestamp"), r.Header.Get("X-Jev-Argos-Signature")
-		if !VerifySignature(secret, ts, sig, body, time.Now(), 5*time.Minute) {
+		if !webhook.Verify(secret, ts, sig, body, time.Now(), 5*time.Minute) {
 			http.Error(w, "bad signature", http.StatusUnauthorized)
 			return
 		}
@@ -209,25 +210,6 @@ func TestWebhookExecutor_SignsAndVerifies(t *testing.T) {
 	}
 	if err := (WebhookExecutor{}).Execute(ctx, a); err == nil {
 		t.Error("missing URL: want error")
-	}
-}
-
-func TestVerifySignature_RejectsStaleAndTampered(t *testing.T) {
-	now := time.Unix(1_700_000_000, 0)
-	body := []byte(`{"x":1}`)
-	ts := "1700000000"
-	sig := "sha256=" + Sign("k", ts, body)
-	if !VerifySignature("k", ts, sig, body, now, time.Minute) {
-		t.Fatal("valid signature rejected")
-	}
-	if VerifySignature("k", ts, sig, []byte(`{"x":2}`), now, time.Minute) {
-		t.Error("tampered body accepted")
-	}
-	if VerifySignature("k", ts, sig, body, now.Add(2*time.Minute), time.Minute) {
-		t.Error("stale timestamp accepted (replay)")
-	}
-	if VerifySignature("k", "not-a-number", sig, body, now, time.Minute) {
-		t.Error("invalid timestamp accepted")
 	}
 }
 

@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -33,7 +34,10 @@ import (
 	jevargosv1 "github.com/jev-argos/jev-argos/gen/v1"
 	"github.com/jev-argos/jev-argos/pkg/action"
 	"github.com/jev-argos/jev-argos/pkg/api"
+	"github.com/jev-argos/jev-argos/pkg/approval"
 	"github.com/jev-argos/jev-argos/pkg/classifier"
+	"github.com/jev-argos/jev-argos/pkg/events"
+	"github.com/jev-argos/jev-argos/pkg/llm"
 	"github.com/jev-argos/jev-argos/pkg/receiver"
 )
 
@@ -86,13 +90,41 @@ func run(cfg config, logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	emitters, err := newEmitters(ctx, cfg, pool, actions, blocklist, logger)
+	stores, err := newDecisionStores(ctx, cfg, pool, logger)
 	if err != nil {
 		return err
 	}
+	defer stores.close()
+	hub := events.NewHub(0, logger) // ダッシュボードへのリアルタイム配信
+
+	var llmEmitter *llm.Emitter
+	provider, err := newLLMProvider(ctx, cfg, logger)
+	if err != nil {
+		return err
+	}
+	if provider != nil {
+		masker, err := newMasker(cfg, provider)
+		if err != nil {
+			return err
+		}
+		sinks := []llm.Sink{
+			llm.ApprovalSink{Store: actions, Logger: logger},
+			llm.SinkFunc(func(_ context.Context, e receiver.Event, a approval.Analysis) { hub.PublishAnalysis(e, a) }),
+		}
+		if stores.analyses != nil {
+			sinks = append(sinks, llm.DBSink{Store: stores.analyses, Logger: logger})
+		}
+		llmEmitter = &llm.Emitter{
+			Analyzer: &llm.Analyzer{Provider: provider, Masker: masker, History: stores.history},
+			Sinks:    sinks,
+			Logger:   logger,
+		}
+		llmEmitter.Start(ctx)
+	}
+	emitters := newEmitters(cfg, stores, actions, blocklist, llmEmitter, logger)
 
 	// --- gRPC: シグナル受信・遮断リスト配信・ヘルスチェック ---
-	srv := receiver.NewServer(buf, classifier.NewDefault(), emitters, receiver.Options{Logger: logger})
+	srv := receiver.NewServer(buf, classifier.NewDefault(), emitters, receiver.Options{Logger: logger, Observer: hub.PublishDecision})
 	gs := grpc.NewServer()
 	jevargosv1.RegisterSignalServiceServer(gs, srv)
 	jevargosv1.RegisterControlServiceServer(gs, &action.ControlServer{Blocklist: blocklist})
@@ -112,7 +144,16 @@ func run(cfg config, logger *slog.Logger) error {
 	// --- 管理 HTTP API ---
 	stopAPI := func() {}
 	if cfg.apiAddr != "" {
-		apiCfg := api.Config{Store: actions, Executor: newExecutor(cfg, blocklist), Blocklist: blocklist}
+		apiCfg := api.Config{
+			Store:     actions,
+			Executor:  newExecutor(cfg, blocklist),
+			Blocklist: blocklist,
+			Routes:    map[string]http.HandlerFunc{"GET /api/events/stream": hub.HandleStream},
+		}
+		if cfg.ingestToken != "" {
+			// HTTP でのシグナル受信 (送信専用トークン。管理 API のトークンとは別)
+			apiCfg.PublicRoutes = map[string]http.Handler{"/api/signals": srv.HTTPHandler(cfg.ingestToken), "/api/signals/": srv.HTTPHandler(cfg.ingestToken)}
+		}
 		if stopAPI, err = startAPI(cfg, apiCfg, serveErr, logger); err != nil {
 			gs.Stop()
 			return err
