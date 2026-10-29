@@ -26,12 +26,11 @@ LLM と人間は本当に必要なものだけを見る。
 | Level | 判定 | jev-argos の対応 |
 | --- | --- | --- |
 | **1** 正常 / 軽微 | S < 1.5 | 記録のみ。大半の通信はここで終わり、LLM を呼ばない |
-| **2** 不審 | 1.5 ≤ S < 2.5 | 判定ログを保存し、LLM で非同期に深層分析 ※ |
-| **3** 攻撃の疑い | 2.5 ≤ S < 3.5 | 承認キューに「IP の一時遮断」を提案し、管理者がダッシュボードで承認 / 拒否する。Slack 通知 ※ |
-| **4** 危険 | S ≥ 3.5 かつ C ≥ 0.8 | ミリ秒で `immediate_action_level = 4` を返す。アプリはその送信元からの以降のリクエストを遮断できる |
+| **2** 不審 | 1.5 ≤ S < 2.5 | 判定ログを保存し、LLM で非同期に深層分析 |
+| **3** 攻撃の疑い | 2.5 ≤ S < 3.5 | 承認キューに「IP の一時遮断」を提案し、Slack / Webhook に通知。管理者がダッシュボードで承認すると遮断する |
+| **4** 危険 | S ≥ 3.5 かつ C ≥ 0.8 | ミリ秒で `immediate_action_level = 4` を返し、送信元 IP を自動遮断。遮断はアダプターに配信され、以降のリクエストを拒否する |
 
 S はリスクスコア (0.0〜4.0)、C は確信度 (0.0〜1.0)。S ≥ 3.5 でも C < 0.8 なら自動遮断せず、Level 3 として承認キューに回す (誤遮断の防止)。
-※ LLM 深層分析と Slack 通知は未実装。
 
 ### アーキテクチャと、このサーバーの位置
 
@@ -59,21 +58,24 @@ S はリスクスコア (0.0〜4.0)、C は確信度 (0.0〜1.0)。S ≥ 3.5 で
 
 | 機能 | 内容 | パッケージ |
 | --- | --- | --- |
-| シグナル受信 | gRPC `jevargos.v1.SignalService` (`ReportSignal` / バッチ用の `StreamSignals`) | `pkg/receiver` |
+| シグナル受信 | gRPC `jevargos.v1.SignalService` (`ReportSignal` / バッチ用の `StreamSignals`)、HTTP `POST /api/signals` | `pkg/receiver` |
 | Sliding Window | 送信元ごとの直近の統計 (1 分間のエラー数・5 分間に権限エラーを受けた API の種類数・レイテンシの比)。メモリまたは Redis | `pkg/buffer` |
 | Jev スコアリング | 統計から S と C を算出 | `pkg/classifier` |
 | 安全境界ルール | S と C から Level を決め、確信度不足なら格下げ | `pkg/guardrail` |
-| 判定ログ | Level 2〜4 を PostgreSQL に保存 | `pkg/db` |
-| 承認キュー | Level 3 に「IP の一時遮断」を提案し、承認 / 拒否を記録 | `pkg/approval` |
-| 管理 API | 承認キューの一覧・承認・拒否と、変更の SSE 配信 (ダッシュボード用) | `pkg/api` |
+| 遮断 | Level 4 の自動遮断と承認された遮断を遮断リストに登録し、`ControlService.WatchBlocklist` でアダプターへ配信。メモリまたは Redis | `pkg/action` |
+| 承認キュー | Level 3 (Jev)・LLM の推奨・管理者の起票を承認待ちにし、承認されたら実行 (IP 遮断 / アプリの Webhook)。メモリまたは PostgreSQL | `pkg/approval`, `pkg/action` |
+| LLM 分析 | Level 2 以上を非同期に分析 (Ollama / Claude)。結果を判定ログ・承認キュー・ダッシュボードへ | `pkg/llm` |
+| 判定ログ | Level 2〜4 と LLM 分析を保存。PostgreSQL または SQLite。LLM 用の Safe View | `pkg/db` |
+| 通知 | Level 3 以上を Slack / Webhook へ (同じ送信元は間引く) | `pkg/notify` |
+| 管理 API | 承認キュー・遮断リストの操作、判定と分析のリアルタイム配信 (SSE) | `pkg/api`, `pkg/events` |
 
-判定は RPC の中で同期的に行い (ミリ秒)、結果の Level を応答で返す。判定ログの保存や承認キューへの登録などの後続処理は
+判定は RPC の中で同期的に行い (ミリ秒)、結果の Level を応答で返す。遮断・判定ログ・LLM 分析・通知などの後続処理は
 非同期のワーカーで行うため、RPC の応答は待たされない。
 
 | ポート | プロトコル | 用途 |
 | --- | --- | --- |
-| 50051 | gRPC (平文) | シグナル受信、gRPC ヘルスチェック |
-| 8080 | HTTP | 管理 API (承認キュー)、`/api/healthz` |
+| 50051 | gRPC (平文) | シグナル受信、遮断リストの配信、gRPC ヘルスチェック |
+| 8080 | HTTP | 管理 API、HTTP でのシグナル受信、`/api/healthz` |
 
 ## 最小導入ステップ (Quick Start)
 
@@ -89,7 +91,7 @@ S はリスクスコア (0.0〜4.0)、C は確信度 (0.0〜1.0)。S ≥ 3.5 で
 docker build -t jev-argos/server .
 docker run -d --name jev-argos -p 127.0.0.1:50051:50051 jev-argos/server
 
-# または Go 1.24 以上で直接起動 (このディレクトリで)
+# または Go 1.26 以上で直接起動 (このディレクトリで)
 go run main.go
 ```
 
@@ -122,7 +124,7 @@ docker logs jev-argos 2>&1 | grep "jev-argos action"
 
 ## 起動のバリエーション
 
-Go 1.24 以上が必要。外部依存なし (インメモリ) で起動できる。
+Go 1.26 以上が必要。外部依存なし (インメモリ) で起動できる。
 
 ```sh
 # このディレクトリで
@@ -146,21 +148,128 @@ go run ./cmd/jev-argos-server
 
 ## 設定
 
-すべてフラグでも環境変数でも指定できる (フラグが優先)。
-環境変数は他のアプリと衝突しないよう `JEV_ARGOS_` 接頭辞を付けている。
+すべてフラグでも環境変数でも指定できる (フラグが優先。`jev-argos-server -h` で一覧)。
+環境変数は他のアプリと衝突しないよう `JEV_ARGOS_` 接頭辞を付けている。指定しなければ外部サービス無しで動く。
 
-| 環境変数 | フラグ | 既定値 | 内容 |
-| --- | --- | --- | --- |
-| `JEV_ARGOS_GRPC_ADDR` | `-addr` | `:50051` | gRPC (シグナル受信) の待受アドレス |
-| `JEV_ARGOS_API_ADDR` | `-api-addr` | `127.0.0.1:8080` | 管理 API の待受アドレス。空文字で無効化 |
-| `JEV_ARGOS_ADMIN_TOKEN` | `-admin-token` | (起動ごとに生成してログに出力) | 管理 API の Bearer トークン。本番では必ず指定する |
-| `JEV_ARGOS_REDIS_URL` | `-redis-url` | (インメモリ) | Sliding Window の統計を Redis で共有する。複数インスタンス構成では必須 |
-| `JEV_ARGOS_POSTGRES_URL` | `-postgres-url` | (保存しない) | Level 2〜4 の判定ログを保存する。テーブル `jev_decision_logs` は起動時に自動作成 |
-| `JEV_ARGOS_DEMO` | `-demo` | `false` | `true` で起動時に疑似シグナルを流す |
+**基本**
 
-- Redis / PostgreSQL に起動時に接続できない場合は、エラーで終了する (設定ミスに気付けるように)。
+| 環境変数 | 既定値 | 内容 |
+| --- | --- | --- |
+| `JEV_ARGOS_GRPC_ADDR` | `:50051` | gRPC の待受アドレス |
+| `JEV_ARGOS_API_ADDR` | `127.0.0.1:8080` | 管理 API の待受アドレス。空文字で無効化 |
+| `JEV_ARGOS_ADMIN_TOKEN` | (起動ごとに生成してログに出力) | 管理 API の Bearer トークン。本番では必ず指定する |
+| `JEV_ARGOS_INGEST_TOKEN` | (無効) | HTTP でのシグナル受信 (`POST /api/signals`) の送信専用トークン。管理用とは別にする |
+| `JEV_ARGOS_DEMO` | `false` | `true` で起動時に疑似シグナルを流す |
+
+**保存先** (指定しなければメモリ上。再起動で消え、複数インスタンスで共有されない)
+
+| 環境変数 | 内容 |
+| --- | --- |
+| `JEV_ARGOS_REDIS_URL` | 統計と遮断リストを Redis で共有する (複数インスタンス構成では必須) |
+| `JEV_ARGOS_POSTGRES_URL` | 判定ログ (`jev_decision_logs`) と承認キュー (`jev_actions`) を保存する。テーブルは起動時に自動作成 |
+| `JEV_ARGOS_SQLITE_PATH` | 開発用: 判定ログを SQLite ファイルに保存する (PostgreSQL を指定した場合は無視) |
+
+**遮断と実行**
+
+| 環境変数 | 既定値 | 内容 |
+| --- | --- | --- |
+| `JEV_ARGOS_BLOCK_TTL` | `15m` | Level 4 の自動遮断・承認による遮断の期間 |
+| `JEV_ARGOS_ACTION_WEBHOOK_URL` | (無し) | IP 遮断以外の承認されたアクション (セッション無効化・アカウント操作など) の実行を依頼する先 ([Webhook](#webhook)) |
+| `JEV_ARGOS_ACTION_WEBHOOK_SECRET` | (署名なし) | 上記の Webhook の署名鍵 |
+
+**LLM 分析** ([LLM 分析](#llm-分析))
+
+| 環境変数 | 既定値 | 内容 |
+| --- | --- | --- |
+| `JEV_ARGOS_LLM_PROVIDER` | `ollama` | `ollama` / `anthropic` / `none` |
+| `JEV_ARGOS_LLM_MODEL` | `qwen2.5:3b` (Ollama) / `claude-opus-5-5` (Claude) | モデル名 |
+| `JEV_ARGOS_OLLAMA_URL` | `http://localhost:11434` (`OLLAMA_HOST` も読む) | Ollama の URL |
+| `ANTHROPIC_API_KEY` | — | `anthropic` の場合の API キー (Anthropic の SDK が読む) |
+| `JEV_ARGOS_LLM_MASK` | `auto` | IP・ユーザー ID を伏せて送るか。`auto` は外部の LLM のときだけ伏せる。`always` / `never` |
+| `JEV_ARGOS_LLM_MASK_KEY` | (起動ごとに生成) | 伏せ字の仮名を作る鍵 |
+| `JEV_ARGOS_LLM_HISTORY_URL` | (判定ログの DB) | LLM の文脈として履歴を読む先。分析専用のリードレプリカを指定する (設計書 6.1) |
+
+**通知** (Level 3 以上。同じ送信元は 10 分に 1 回、Level が上がればすぐ)
+
+| 環境変数 | 内容 |
+| --- | --- |
+| `JEV_ARGOS_SLACK_WEBHOOK_URL` | Slack の Incoming Webhook |
+| `JEV_ARGOS_ALERT_WEBHOOK_URL` / `JEV_ARGOS_ALERT_WEBHOOK_SECRET` | 汎用 Webhook (JSON、署名付き) |
+| `JEV_ARGOS_DASHBOARD_URL` | 通知に載せるダッシュボードの URL |
+
+- Redis / PostgreSQL に起動時に接続できない場合は、エラーで終了する (設定ミスに気付けるように)。Ollama に接続できない場合は警告を出して起動を続ける。
 - 起動後に Redis が停止した場合、`ReportSignal` は `UNAVAILABLE` を返す。送信側は Fire-and-Forget のため、アプリ本体には影響しない。
-- 管理 API の待受の既定は `127.0.0.1` (同じホストからのみ)。コンテナでは `:8080` にする (Docker イメージは設定済み)。
+
+## LLM 分析
+
+Level 2 以上の判定を、専用のキューで非同期に LLM へ渡す (RPC の応答や他の処理を待たせない)。
+
+- **コスト制御**: 同じ送信元は 5 分に 1 回だけ分析する (Level が上がれば再分析)。キューが満杯なら分析を見送る。
+- **結果の反映**: 判定ログ (`llm_analysis` 列)、同じ送信元の承認待ちへの添付、ダッシュボードへの配信。
+  LLM が対処を推奨すると承認キューに提案される (出どころ「LLM」)。
+- **安全性**: LLM の入力には攻撃者が書いた文字列 (User-Agent 等) が含まれるため、プロンプトでデータとして扱うよう指示し、
+  出力は JSON Schema で検証する。LLM が推奨できる対処は取り消せる操作 (IP 遮断・セッション無効化・アカウント一時停止・縮小運転) に限り、
+  対象は LLM ではなく判定結果から決める。推奨はすべて管理者の承認を経て実行される。
+- **個人情報**: 外部の LLM に送る場合は IP・ユーザー ID を鍵付きハッシュの仮名に置き換える。履歴は個人情報を含まない Safe View
+  (`jev_decision_logs_safe`) から読み取り専用・2 秒のタイムアウトで読む (設計書 6.1)。本番では Safe View だけを読める DB ユーザーと
+  リードレプリカを用意し、`JEV_ARGOS_LLM_HISTORY_URL` に指定すること (`pkg/db/postgres.go` の SQL コメントに例)。
+
+```bash
+# Ollama (既定): モデルを取得して起動するだけ
+ollama pull qwen2.5:3b
+go run ./cmd/jev-argos-server
+
+# Claude
+JEV_ARGOS_LLM_PROVIDER=anthropic ANTHROPIC_API_KEY=sk-ant-... go run ./cmd/jev-argos-server
+```
+
+Claude を使う場合は、要求が安全性の分類器に断られたときに別のモデルが引き継ぐサーバー側のフォールバックを有効にしている。
+他の LLM を使う場合は `pkg/llm` の `Provider` を実装する ([差し替えポイント](../../README.md#差し替えポイント))。
+
+## Webhook
+
+承認されたアクション (`JEV_ARGOS_ACTION_WEBHOOK_URL`) と通知 (`JEV_ARGOS_ALERT_WEBHOOK_URL`) は、署名付きの JSON を POST する。
+
+```
+POST <URL>
+Content-Type: application/json
+X-Jev-Argos-Timestamp: <UNIX 秒>
+X-Jev-Argos-Signature: sha256=<hex(HMAC-SHA256(secret, timestamp + "." + body))>
+
+{"type": "action.approved", "action": {"action_id": "...", "proposed_action": "suspend_account", "target": "user-42", ...}}
+```
+
+受信側は署名とタイムスタンプ (再送攻撃を防ぐため 5 分以内など) を検証し、実行できたら 2xx を返す。2xx 以外は実行失敗としてダッシュボードに表示される。
+Go では `pkg/webhook` の `VerifyRequest` で検証できる:
+
+```go
+http.HandleFunc("POST /jev-argos/actions", func(w http.ResponseWriter, r *http.Request) {
+	body, ok := webhook.VerifyRequest(r, os.Getenv("JEV_ARGOS_ACTION_WEBHOOK_SECRET"), 5*time.Minute)
+	if !ok {
+		http.Error(w, "invalid signature", http.StatusUnauthorized)
+		return
+	}
+	var p action.WebhookPayload
+	json.Unmarshal(body, &p)
+	switch p.Action.ProposedAction {
+	case approval.ActionRevokeSession: // アプリのセッションストアから p.Action.Target のセッションを消す
+	case approval.ActionSuspendAccount: // アカウントを停止する
+	}
+	w.WriteHeader(http.StatusNoContent)
+})
+```
+
+## API
+
+| エンドポイント | 認証 | 内容 |
+| --- | --- | --- |
+| `GET /api/healthz` | なし | 死活確認 |
+| `POST /api/signals`、`POST /api/signals/batch` | 送信専用トークン | HTTP (JSON) でのシグナル受信。本文は proto と同じフィールド名 |
+| `GET /api/actions[?status=pending]`、`GET /api/actions/{id}` | 管理トークン | 承認キュー |
+| `POST /api/actions` | 管理トークン | 管理者による起票 |
+| `POST /api/actions/{id}/approve`、`/reject` | 管理トークン | 承認 (実行) / 拒否 |
+| `GET /api/blocklist`、`POST /api/blocklist`、`DELETE /api/blocklist?target=...` | 管理トークン | 遮断リストの参照・手動の遮断・解除 |
+| `GET /api/actions/stream`、`/api/blocklist/stream`、`/api/events/stream` | 管理トークン | 承認キュー・遮断リスト・判定と LLM 分析の SSE 配信 |
 
 ## ヘルスチェック
 
@@ -269,10 +378,13 @@ spec:
 
 ### スケールについて
 
-- **シグナル受信と判定**は、`JEV_ARGOS_REDIS_URL` を指定すれば複数レプリカで動く (Sliding Window の統計を Redis で共有する)。
-  インメモリのまま複数レプリカにすると、IP ごとの統計がレプリカに分散し、攻撃を見逃す。
-- **承認待ちアクション**は現在プロセスのメモリに保持しているため、レプリカごとに別々の一覧になり、再起動で消える。
-  承認機能を使う場合は当面 `replicas: 1` で運用すること。
+複数レプリカで動かす場合は、Redis と PostgreSQL の両方を指定する。
+
+- **統計と遮断リスト** (`JEV_ARGOS_REDIS_URL`): IP ごとの統計と遮断がレプリカ間で共有される。どのレプリカで遮断しても、
+  すべてのレプリカに接続したアダプターへ配信される。インメモリのまま複数レプリカにすると、統計が分散して攻撃を見逃す。
+- **承認キュー** (`JEV_ARGOS_POSTGRES_URL`): 承認待ちがレプリカ間で共有され、変更は LISTEN/NOTIFY で全レプリカの SSE に届く。
+  同じ対象への承認待ちは DB の制約で 1 件に保たれる。
+- **LLM 分析の間引き**はレプリカごとに行うため、レプリカ数だけ分析の回数が増えうる。
 
 ## セキュリティ上の注意
 

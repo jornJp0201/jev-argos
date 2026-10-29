@@ -22,6 +22,7 @@ const (
 	BlockConfidenceThreshold = 0.8
 
 	// Level 2 / 3 の下限スコア。設計書に数値の定めが無いため暫定値。
+	// [差し替えポイント] 運用データを見て調整する (S ≥ 3.5 / C ≥ 0.8 の遮断条件は設計書 5.1.1 の値)。
 	Level2ScoreThreshold = 1.5
 	Level3ScoreThreshold = 2.5
 )

@@ -1,6 +1,7 @@
 # JEV_ARGOS_API_URL / JEV_ARGOS_ADMIN_TOKEN は起動時に展開される。
 # 管理 API のトークンはこのプロキシだけが持ち、ブラウザには渡さない。
 # このポートに到達できる人は誰でも承認操作ができるため、公開する場合は前段で管理者を認証すること。
+# [差し替えポイント] 社内の SSO (oauth2-proxy 等) をこの前段に置き、認証済みのユーザーだけを通す。
 server {
     listen 8080;
     root /usr/share/nginx/html;

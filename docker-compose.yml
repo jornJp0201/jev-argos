@@ -8,6 +8,11 @@
 #   管理 API          http://localhost:8080 (Authorization: Bearer $JEV_ARGOS_ADMIN_TOKEN)
 #   PostgreSQL        localhost:55432 (jevargos / jevargos)
 #
+# LLM 分析は既定でホストの Ollama (http://localhost:11434) を使う。Ollama をコンテナで動かす場合:
+#   JEV_ARGOS_OLLAMA_URL=http://ollama:11434 docker compose --profile llm up --build
+#   docker compose exec ollama ollama pull qwen2.5:3b     # 初回のみ
+# LLM を使わない場合は JEV_ARGOS_LLM_PROVIDER=none。Slack 等の設定は README の「設定」を参照。
+#
 # 公開ポートはすべて 127.0.0.1 に限定している (ローカル検証用)。
 
 x-admin-token: &admin-token ${JEV_ARGOS_ADMIN_TOKEN:?JEV_ARGOS_ADMIN_TOKEN を設定してください (README 参照)}
@@ -22,6 +27,22 @@ services:
       JEV_ARGOS_ADMIN_TOKEN: *admin-token
       # 起動時に疑似シグナルを流し、ダッシュボードに承認待ちアラートを発生させる (不要なら false)
       JEV_ARGOS_DEMO: ${JEV_ARGOS_DEMO:-true}
+      # LLM 分析 (既定: ホストの Ollama)
+      JEV_ARGOS_LLM_PROVIDER: ${JEV_ARGOS_LLM_PROVIDER:-ollama}
+      JEV_ARGOS_OLLAMA_URL: ${JEV_ARGOS_OLLAMA_URL:-http://host.docker.internal:11434}
+      JEV_ARGOS_LLM_MODEL: ${JEV_ARGOS_LLM_MODEL:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-} # JEV_ARGOS_LLM_PROVIDER=anthropic のときだけ使う
+      # 通知と実行の Webhook (任意)
+      JEV_ARGOS_SLACK_WEBHOOK_URL: ${JEV_ARGOS_SLACK_WEBHOOK_URL:-}
+      JEV_ARGOS_ALERT_WEBHOOK_URL: ${JEV_ARGOS_ALERT_WEBHOOK_URL:-}
+      JEV_ARGOS_ALERT_WEBHOOK_SECRET: ${JEV_ARGOS_ALERT_WEBHOOK_SECRET:-}
+      JEV_ARGOS_ACTION_WEBHOOK_URL: ${JEV_ARGOS_ACTION_WEBHOOK_URL:-}
+      JEV_ARGOS_ACTION_WEBHOOK_SECRET: ${JEV_ARGOS_ACTION_WEBHOOK_SECRET:-}
+      JEV_ARGOS_DASHBOARD_URL: http://localhost:3000
+      # HTTP でのシグナル受信 (POST /api/signals) の送信専用トークン (任意。空なら無効)
+      JEV_ARGOS_INGEST_TOKEN: ${JEV_ARGOS_INGEST_TOKEN:-}
+    extra_hosts:
+      - "host.docker.internal:host-gateway" # Linux でもホストの Ollama に届くように
     ports:
       - "127.0.0.1:50051:50051"
       - "127.0.0.1:8080:8080"
@@ -75,5 +96,13 @@ services:
       core:
         condition: service_healthy
 
+  # LLM (任意): docker compose --profile llm up で起動する
+  ollama:
+    image: ollama/ollama:0.6.8
+    profiles: ["llm"]
+    volumes:
+      - ollama:/root/.ollama
+
 volumes:
   pgdata:
+  ollama:

@@ -40,6 +40,9 @@ type WindowStats struct {
 }
 
 // Buffer は Sliding Window Buffer の共通インターフェース。
+//
+// [差し替えポイント] Redis 以外の共有ストア (Memcached・DynamoDB 等) を使う場合はこれを実装する。
+// 振る舞いの要件は buffer_contract_test.go の共通テスト (runContractTests) で確認できる。
 type Buffer interface {
 	// RecordSignal はシグナルを記録する。
 	RecordSignal(ctx context.Context, signal *jevargosv1.SecuritySignal) error

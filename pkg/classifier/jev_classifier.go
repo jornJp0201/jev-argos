@@ -15,6 +15,10 @@ const (
 )
 
 // Model は特徴量ベクトルからリスクスコア S と確信度 C を算出する分類モデル。
+//
+// [差し替えポイント] 学習済みの Jev モデルを使う場合は Model を実装し、classifier.New(model) に渡す
+// (cmd/jev-argos-server/main.go の classifier.NewDefault() を置き換える)。既定の HeuristicModel は
+// 学習データが無い段階の暫定のルールベースモデル。
 // 返り値は Classifier 側で範囲外・NaN を補正するため、厳密に範囲内である必要はない。
 type Model interface {
 	Evaluate(features buffer.Features) (score, confidence float64)

@@ -41,7 +41,10 @@ export interface ReportResponse {
   immediate_action_level: number;
 }
 
-/** メタデータから利用者情報を取り出す関数。認証方式はアプリごとに異なるため利用側で指定する。 */
+/**
+ * メタデータから利用者情報を取り出す関数。
+ * [差し替えポイント] 認証方式はアプリごとに異なるため利用側で指定する (例: 認証済みのメタデータ x-user-id、JWT の sub)。
+ */
 export type UserExtractor = (metadata: Metadata) => { userId?: string | undefined; userRole?: string | undefined } | undefined;
 
 export interface SignalOptions {

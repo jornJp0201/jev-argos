@@ -26,12 +26,11 @@ LLM と人間は本当に必要なものだけを見る。
 | Level | jev-argos の対応 |
 | --- | --- |
 | **1** 正常 / 軽微 | 記録のみ。大半の通信はここで終わり、LLM を呼ばない |
-| **2** 不審 | 判定ログを保存し、LLM で非同期に深層分析 ※ |
-| **3** 攻撃の疑い | ダッシュボードの承認キューに「IP の一時遮断」を提案し、管理者が承認 / 拒否する。Slack 通知 ※ |
-| **4** 危険 | ミリ秒で `Level 4` を返す。アプリはその送信元からの以降のリクエストを遮断できる |
+| **2** 不審 | 判定ログを保存し、LLM で非同期に深層分析 |
+| **3** 攻撃の疑い | 承認キューに「IP の一時遮断」を提案し、Slack / Webhook に通知。管理者が承認すると遮断する |
+| **4** 危険 | ミリ秒で `Level 4` を返し、送信元 IP を自動遮断。`BlocklistWatcher` を使うと以降のリクエストを拒否できる |
 
 危険なスコアでも確信度が 0.8 未満なら自動遮断せず、Level 3 として人間の承認キューに回す (誤遮断の防止)。
-※ LLM 深層分析と Slack 通知はコントロールサーバー側で未実装。
 
 ### アーキテクチャと、このパッケージの位置
 
@@ -77,7 +76,7 @@ jev-argos のリポジトリのルートで:
 docker build -t jev-argos/server .
 docker run -d --name jev-argos -p 127.0.0.1:50051:50051 jev-argos/server
 
-# または Go 1.24 以上で直接起動
+# または Go 1.26 以上で直接起動
 go run ./cmd/jev-argos-server
 ```
 
@@ -219,28 +218,35 @@ const userClient = new UserServiceClient("user-service:50051", grpc.credentials.
 });
 ```
 
-### Level 4 (即時遮断) の通知を受けて遮断する
+### 遮断を有効にする (BlocklistWatcher)
 
-シグナルは応答の後に送るため、Level 4 と判定されたリクエスト自体は止まらない。
-通知を受けて、その送信元からの**以降の**リクエストを遮断する。
+コントロールサーバーは Level 4 の送信元を自動遮断し、管理者が承認した遮断とあわせて遮断リストを配信する。
+`BlocklistWatcher` で購読してミドルウェア / インターセプターに渡すと、遮断中の IP からのリクエストを拒否する
+(Express / Next.js は 403、gRPC は `PERMISSION_DENIED`。アプリのハンドラーは呼ばれない)。
 
 ```ts
-const blocked = new Map<string, number>(); // IP -> 遮断の期限
+import { BlocklistWatcher } from "@jev-argos/adapter-node";
 
-const reporter = new SignalReporter({
-  target: "localhost:50051",
-  onResponse: (res, signal) => {
-    if (res.immediate_action_level >= 4) {
-      blocked.set(signal.user_context.client_ip, Date.now() + 15 * 60_000); // 15 分間遮断
-    }
-  },
-});
+const blocklist = new BlocklistWatcher({ target: "localhost:50051" });
 
-app.use((req, res, next) => {
-  const until = blocked.get(req.ip ?? "");
-  if (until && until > Date.now()) return res.status(403).end();
-  next();
-});
+app.use(createExpressMiddleware(reporter, { sourceService: "main-bff", blocklist }));            // Express
+export const GET = withJevArgos(reporter, { route: "/api/x", sourceService: "main-bff", blocklist }, handler); // Next.js
+new grpc.Server({ interceptors: [createServerInterceptor(reporter, { sourceService: "main-bff", blocklist })] }); // gRPC
+```
+
+- 判定は手元のコピーを見るだけなので、リクエストごとの通信は発生しない。
+- 接続が切れても自動で再接続し、その間は最後に受け取った一覧で判定を続ける (期限切れの遮断は手元で解除する)。
+- シグナルは応答の後に送るため、Level 4 と判定されたリクエスト自体は止まらない。遮断されるのはその送信元からの**以降の**リクエスト。
+
+遮断リストを使わずに独自に遮断したい場合は、`onResponse` で `immediate_action_level >= 4` を受け取れる。
+
+### バッチ送信 (高トラフィック向け)
+
+`batch` を指定すると、一定件数 / 一定時間ごとに `StreamSignals` でまとめて送る (設計書 4 章 Phase 2)。送信回数が減る代わりに、
+`onResponse` はバッチ単位になる (遮断には `BlocklistWatcher` を使う)。
+
+```ts
+const reporter = new SignalReporter({ target: "localhost:50051", batch: { maxSize: 50, flushIntervalMs: 100 } });
 ```
 
 ### 終了処理
@@ -251,6 +257,17 @@ process.on("SIGTERM", async () => {
   process.exit(0);
 });
 ```
+
+## 実際の開発で決めること (差し替えポイント)
+
+| 項目 | 指定する場所 | 既定 |
+| --- | --- | --- |
+| ユーザー ID の取り出し方 (認証方式に合わせる) | gRPC: `extractUser`、HTTP: `reportHttp` の `userId` | 送らない |
+| クライアント IP の取り出し方 (プロキシの構成に合わせる) | Express の `trust proxy`、Next.js の `getClientIp`、gRPC の `trustProxyHeaders` | 接続元 / `x-forwarded-for` (Next.js) |
+| 遮断したリクエストへの応答 | `onBlocked` | 403 `{"error":"forbidden"}` |
+| コントロールサーバーとの通信の暗号化 | `credentials` | 平文 (クラスタ外を通る場合は TLS にする) |
+
+コードでは `[差し替えポイント]` のコメントを付けている。
 
 ## 設定オプション
 
@@ -264,7 +281,19 @@ process.on("SIGTERM", async () => {
 | `credentials` | `grpc.ChannelCredentials` | 平文 | 接続の認証情報。TLS を使う場合は `grpc.credentials.createSsl()` |
 | `onResponse` | `(res, signal) => void` | — | サーバーの応答 (`immediate_action_level` を含む) を受け取る |
 | `onError` | `(err, signal) => void` | — | 送信失敗を受け取る (ログやメトリクス用) |
+| `batch` | `{ maxSize?, flushIntervalMs? }` | 無し (1 件ずつ送る) | バッチ送信。既定 50 件 / 100ms |
 | `protoPath` | `string` | 同梱の `proto/signal.proto` | スキーマファイルの場所 |
+
+### `new BlocklistWatcher(options)`
+
+| オプション | 既定値 | 内容 |
+| --- | --- | --- |
+| `target` | (必須) | コントロールサーバーの gRPC アドレス (`SignalReporter` と同じ) |
+| `credentials` | 平文 | 接続の認証情報 |
+| `maxReconnectDelayMs` | `30000` | 再接続の待ち時間の上限 (1 秒から倍々に延ばす) |
+| `onChange` / `onError` | — | 遮断リストの変更 / 購読の切断を受け取る |
+
+`isBlocked(ip)`・`list()`・`ready` (最初の一覧を受け取ったか)・`close()` を持つ。
 
 - `reporter.stats` で `{ sent, failed, dropped, inFlight }` を取得できる。
 - `reporter.close()` は新規の受付を止め、送信中のシグナルを待ってから接続を閉じる。
@@ -276,6 +305,8 @@ process.on("SIGTERM", async () => {
 | オプション | 内容 |
 | --- | --- |
 | `sourceService` | 送信元サービス名 (必須)。ダッシュボードや判定ログでの識別に使う |
+| `blocklist` | (`createExpressMiddleware`) 遮断リスト。遮断中の IP を 403 で拒否する |
+| `onBlocked` | (`createExpressMiddleware`) 遮断したリクエストへの応答。既定は 403 と `{"error":"forbidden"}` |
 
 `reportHttp` に渡す `observation`:
 
@@ -295,12 +326,14 @@ process.on("SIGTERM", async () => {
 | `route` | ルートのパターン (例: `"/api/users/[id]"`)。必須 |
 | `sourceService` | 送信元サービス名。必須 |
 | `getClientIp` | `(req: Request) => string`。既定は `x-forwarded-for` の先頭 → `x-real-ip` |
+| `blocklist` / `onBlocked` | 遮断リストと、遮断したリクエストへの応答 (`(req) => Response`) |
 
 ### `createServerInterceptor` / `createClientInterceptor` のオプション
 
 | オプション | 既定値 | 内容 |
 | --- | --- | --- |
 | `sourceService` | (必須) | 送信元サービス名 |
+| `blocklist` | — | (サーバー側) 遮断リスト。遮断中の IP の RPC を `PERMISSION_DENIED` で拒否する |
 | `trustProxyHeaders` | `false` | (サーバー側) `x-forwarded-for` / `x-real-ip` を信頼するか。信頼できるロードバランサーの背後でのみ `true` にする |
 | `extractUser` | — | メタデータから `{ userId, userRole }` を取り出す関数 |
 | `includeMetadataKeys` | `[]` | `metadata_masked` に含めるキー。機密キー (authorization, cookie, token, api-key 等) の値は `***` になる |
