@@ -1,11 +1,16 @@
 // Package api はコントロール用フロントエンド向けの管理 HTTP API を提供する。
 //
-//	GET  /api/healthz                     死活確認 (認証不要)
-//	GET  /api/actions?status=pending      アクション一覧 (status 省略で全件)
-//	GET  /api/actions/{id}                アクション詳細
-//	POST /api/actions/{id}/approve        承認   body: {"decided_by": "...", "note": "..."}
-//	POST /api/actions/{id}/reject         拒否   body: 同上
-//	GET  /api/actions/stream              アクションの作成・更新を Server-Sent Events で配信
+//	GET    /api/healthz                         死活確認 (認証不要)
+//	GET    /api/actions?status=pending          アクション一覧 (status 省略で全件)
+//	POST   /api/actions                         管理者による起票 body: {"proposed_action", "target", "reason", "created_by"}
+//	GET    /api/actions/{id}                    アクション詳細
+//	POST   /api/actions/{id}/approve            承認して実行   body: {"decided_by": "...", "note": "..."}
+//	POST   /api/actions/{id}/reject             拒否           body: 同上
+//	GET    /api/actions/stream                  アクションの作成・更新を Server-Sent Events で配信
+//	GET    /api/blocklist                       遮断中の一覧
+//	POST   /api/blocklist                       手動で遮断     body: {"target", "reason", "ttl_seconds", "created_by"}
+//	DELETE /api/blocklist?target_type=ip&target=...   遮断の解除
+//	GET    /api/blocklist/stream                遮断の追加・解除を SSE で配信
 //
 // /api/healthz 以外は `Authorization: Bearer <token>` が必須。
 // 承認は不可逆な操作の実行につながるため、認証なしでは一切受け付けない。
@@ -17,36 +22,43 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"net"
 	"net/http"
 	"strings"
 	"time"
 
+	"github.com/jev-argos/jev-argos/pkg/action"
 	"github.com/jev-argos/jev-argos/pkg/approval"
 )
 
 const (
-	maxBodyBytes      = 16 << 10
-	maxDecidedByLen   = 100
-	maxNoteLen        = 1000
-	sseHeartbeat      = 15 * time.Second
-	executeTimeout    = 5 * time.Second
-	streamEventAction = "action"
+	maxBodyBytes    = 16 << 10
+	maxDecidedByLen = 100
+	maxNoteLen      = 1000
+	maxTargetLen    = 200
+	sseHeartbeat    = 15 * time.Second
+	executeTimeout  = 10 * time.Second
+	maxBlockTTL     = 30 * 24 * time.Hour
 )
 
 // Config は Handler の設定。
 type Config struct {
 	Store    approval.Store
 	Executor approval.Executor // nil なら approval.LogExecutor
+	// Blocklist を指定すると /api/blocklist を有効にする。
+	Blocklist action.Blocklist
 	// AdminToken は管理 API の Bearer トークン。空にはできない。
 	AdminToken string
 	Logger     *slog.Logger
 }
 
 type handler struct {
-	store    approval.Store
-	executor approval.Executor
-	token    []byte
-	logger   *slog.Logger
+	store     approval.Store
+	executor  approval.Executor
+	blocklist action.Blocklist
+	token     []byte
+	logger    *slog.Logger
+	mux       *http.ServeMux
 }
 
 // NewHandler は管理 API の http.Handler を返す。
@@ -60,18 +72,94 @@ func NewHandler(cfg Config) (http.Handler, error) {
 	if cfg.Executor == nil {
 		cfg.Executor = approval.LogExecutor{Logger: cfg.Logger}
 	}
-	h := &handler{store: cfg.Store, executor: cfg.Executor, token: []byte(cfg.AdminToken), logger: cfg.Logger}
-
 	mux := http.NewServeMux()
+	h := &handler{store: cfg.Store, executor: cfg.Executor, blocklist: cfg.Blocklist, token: []byte(cfg.AdminToken), logger: cfg.Logger, mux: mux}
+
 	mux.HandleFunc("GET /api/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
 	mux.Handle("GET /api/actions", h.auth(h.list))
+	mux.Handle("POST /api/actions", h.auth(h.create))
 	mux.Handle("GET /api/actions/stream", h.auth(h.stream))
 	mux.Handle("GET /api/actions/{id}", h.auth(h.get))
 	mux.Handle("POST /api/actions/{id}/approve", h.auth(h.decide(true)))
 	mux.Handle("POST /api/actions/{id}/reject", h.auth(h.decide(false)))
-	return mux, nil
+	if h.blocklist != nil {
+		mux.Handle("GET /api/blocklist", h.auth(h.listBlocks))
+		mux.Handle("POST /api/blocklist", h.auth(h.block))
+		mux.Handle("DELETE /api/blocklist", h.auth(h.unblock))
+		mux.Handle("GET /api/blocklist/stream", h.auth(h.streamBlocks))
+	}
+	return h, nil
+}
+
+func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) { h.mux.ServeHTTP(w, r) }
+
+// Handle は管理 API に認証付きのエンドポイントを追加する (他パッケージの API を同じサーバーに載せるため)。
+func Handle(api http.Handler, pattern string, h http.HandlerFunc) {
+	if hh, ok := api.(*handler); ok {
+		hh.mux.Handle(pattern, hh.auth(h))
+	}
+}
+
+// decodeJSON はリクエストボディを v に読み込む。未知のフィールドは拒否する。
+func decodeJSON(w http.ResponseWriter, r *http.Request, v any) bool {
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(v); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body")
+		return false
+	}
+	return true
+}
+
+type createRequest struct {
+	ProposedAction approval.ActionType `json:"proposed_action"`
+	Target         string              `json:"target"`
+	Reason         string              `json:"reason"`
+	CreatedBy      string              `json:"created_by"`
+}
+
+// create は管理者がアクションを起票する (例: 調査の結果、アカウント停止を提案する)。
+// 起票したアクションも承認待ちになり、承認されるまで実行されない。
+func (h *handler) create(w http.ResponseWriter, r *http.Request) {
+	var req createRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	req.Target = strings.TrimSpace(req.Target)
+	req.Reason = strings.TrimSpace(req.Reason)
+	req.CreatedBy = strings.TrimSpace(req.CreatedBy)
+	switch {
+	case !req.ProposedAction.Known():
+		writeError(w, http.StatusBadRequest, "unknown proposed_action")
+		return
+	case req.Target == "" || len(req.Target) > maxTargetLen:
+		writeError(w, http.StatusBadRequest, "target is required (max 200 bytes)")
+		return
+	case req.CreatedBy == "" || len(req.CreatedBy) > maxDecidedByLen:
+		writeError(w, http.StatusBadRequest, "created_by is required (max 100 bytes)")
+		return
+	case req.Reason == "" || len(req.Reason) > maxNoteLen:
+		writeError(w, http.StatusBadRequest, "reason is required (max 1000 bytes)")
+		return
+	}
+	a, err := h.store.Propose(r.Context(), approval.Proposal{
+		ProposedAction: req.ProposedAction,
+		Target:         req.Target,
+		Reason:         req.Reason + " (起票: " + req.CreatedBy + ")",
+		Source:         approval.SourceAdmin,
+	})
+	if errors.Is(err, approval.ErrStoreFull) {
+		writeError(w, http.StatusServiceUnavailable, "too many pending actions")
+		return
+	}
+	if err != nil {
+		h.internalError(w, err)
+		return
+	}
+	h.logger.Info("action created by admin", "action_id", a.ID, "proposed_action", a.ProposedAction, "target", a.Target, "created_by", req.CreatedBy)
+	writeJSON(w, http.StatusCreated, a)
 }
 
 func (h *handler) auth(next http.HandlerFunc) http.Handler {
@@ -123,10 +211,7 @@ type decisionRequest struct {
 func (h *handler) decide(approve bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req decisionRequest
-		dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes))
-		dec.DisallowUnknownFields()
-		if err := dec.Decode(&req); err != nil {
-			writeError(w, http.StatusBadRequest, "invalid JSON body")
+		if !decodeJSON(w, r, &req) {
 			return
 		}
 		req.DecidedBy = strings.TrimSpace(req.DecidedBy)
@@ -156,10 +241,17 @@ func (h *handler) decide(approve bool) http.HandlerFunc {
 
 		h.logger.Info("action decided", "action_id", a.ID, "status", a.Status, "target", a.Target, "decided_by", a.DecidedBy)
 		if approve {
+			// 管理者の画面が閉じられても実行は最後まで行う
 			ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), executeTimeout)
 			defer cancel()
-			if err := h.executor.Execute(ctx, a); err != nil {
-				h.logger.Error("execute approved action failed", "action_id", a.ID, "err", err)
+			execErr := h.executor.Execute(ctx, a)
+			if execErr != nil {
+				h.logger.Error("execute approved action failed", "action_id", a.ID, "err", execErr)
+			}
+			if recorded, err := h.store.RecordExecution(ctx, a.ID, execErr); err == nil {
+				a = recorded
+			} else {
+				h.logger.Error("record execution failed", "action_id", a.ID, "err", err)
 			}
 		}
 		writeJSON(w, http.StatusOK, a)
@@ -167,14 +259,112 @@ func (h *handler) decide(approve bool) http.HandlerFunc {
 }
 
 func (h *handler) stream(w http.ResponseWriter, r *http.Request) {
+	updates, cancel := h.store.Subscribe()
+	defer cancel()
+	ServeSSE(w, r, h.logger, func(a approval.Action) (string, any) { return "action", a }, updates)
+}
+
+type blockRequest struct {
+	Target     string `json:"target"`
+	Reason     string `json:"reason"`
+	TTLSeconds int64  `json:"ttl_seconds"` // 0 なら action.DefaultBlockTTL
+	CreatedBy  string `json:"created_by"`
+}
+
+func (h *handler) listBlocks(w http.ResponseWriter, r *http.Request) {
+	entries, err := h.blocklist.List(r.Context())
+	if err != nil {
+		h.internalError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"entries": entries})
+}
+
+func (h *handler) block(w http.ResponseWriter, r *http.Request) {
+	var req blockRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	req.Target = strings.TrimSpace(req.Target)
+	req.CreatedBy = strings.TrimSpace(req.CreatedBy)
+	ttl := time.Duration(req.TTLSeconds) * time.Second
+	if ttl == 0 {
+		ttl = action.DefaultBlockTTL
+	}
+	switch {
+	case net.ParseIP(req.Target) == nil:
+		writeError(w, http.StatusBadRequest, "target must be an IP address")
+		return
+	case req.CreatedBy == "" || len(req.CreatedBy) > maxDecidedByLen:
+		writeError(w, http.StatusBadRequest, "created_by is required (max 100 bytes)")
+		return
+	case len(req.Reason) > maxNoteLen:
+		writeError(w, http.StatusBadRequest, "reason is too long (max 1000 bytes)")
+		return
+	case ttl < 0 || ttl > maxBlockTTL:
+		writeError(w, http.StatusBadRequest, "ttl_seconds must be between 1 and 2592000")
+		return
+	}
+	now := time.Now()
+	e := action.Entry{
+		TargetType: action.TargetIP,
+		Target:     req.Target,
+		Reason:     strings.TrimSpace(req.Reason + " (手動: " + req.CreatedBy + ")"),
+		Source:     action.SourceAdmin,
+		CreatedAt:  now,
+		ExpiresAt:  now.Add(ttl),
+	}
+	if err := h.blocklist.Block(r.Context(), e); err != nil {
+		h.internalError(w, err)
+		return
+	}
+	h.logger.Info("blocked by admin", "target", e.Target, "ttl", ttl, "created_by", req.CreatedBy)
+	writeJSON(w, http.StatusCreated, e)
+}
+
+func (h *handler) unblock(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	targetType, target := q.Get("target_type"), q.Get("target")
+	if targetType == "" {
+		targetType = action.TargetIP
+	}
+	if target == "" {
+		writeError(w, http.StatusBadRequest, "target is required")
+		return
+	}
+	if err := h.blocklist.Unblock(r.Context(), targetType, target); err != nil {
+		h.internalError(w, err)
+		return
+	}
+	h.logger.Info("unblocked by admin", "target_type", targetType, "target", target)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+type blockEvent struct {
+	Kind  string       `json:"kind"` // "added" | "removed"
+	Entry action.Entry `json:"entry"`
+}
+
+func (h *handler) streamBlocks(w http.ResponseWriter, r *http.Request) {
+	events, cancel := h.blocklist.Subscribe()
+	defer cancel()
+	ServeSSE(w, r, h.logger, func(ev action.Event) (string, any) {
+		kind := "added"
+		if ev.Kind == action.EventRemoved {
+			kind = "removed"
+		}
+		return "block", blockEvent{Kind: kind, Entry: ev.Entry}
+	}, events)
+}
+
+// ServeSSE は updates を Server-Sent Events として配信する。encode は (イベント名, データ) を返す。
+// クライアントの切断か updates のクローズで終了する。
+func ServeSSE[T any](w http.ResponseWriter, r *http.Request, logger *slog.Logger, encode func(T) (string, any), updates <-chan T) {
 	rc := http.NewResponseController(w)
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("X-Accel-Buffering", "no") // リバースプロキシのバッファリングを無効化
 	w.WriteHeader(http.StatusOK)
-
-	updates, cancel := h.store.Subscribe()
-	defer cancel()
 
 	write := func(s string) bool {
 		if _, err := w.Write([]byte(s)); err != nil {
@@ -196,13 +386,17 @@ func (h *handler) stream(w http.ResponseWriter, r *http.Request) {
 			if !write(": heartbeat\n\n") {
 				return
 			}
-		case a := <-updates:
-			data, err := json.Marshal(a)
+		case u, ok := <-updates:
+			if !ok {
+				return
+			}
+			name, v := encode(u)
+			data, err := json.Marshal(v)
 			if err != nil {
-				h.logger.Error("marshal action", "err", err)
+				logger.Error("marshal sse event", "err", err)
 				continue
 			}
-			if !write("event: " + streamEventAction + "\ndata: " + string(data) + "\n\n") {
+			if !write("event: " + name + "\ndata: " + string(data) + "\n\n") {
 				return
 			}
 		}

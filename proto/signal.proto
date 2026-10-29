@@ -56,3 +56,34 @@ message ReportResponse {
   bool accepted = 1;
   int32 immediate_action_level = 2; // レベル4等の即時ブロック通知用
 }
+
+// ---------------------------------------------------------------------------
+// 以下は設計書 3.1 節への追加 (遮断の実行: 設計書 2 章 "Guardrails & Action Emitter")
+// ---------------------------------------------------------------------------
+
+// 遮断リストの配信サービス。アダプターが購読し、遮断中の送信元からのリクエストをアプリ側で拒否する。
+service ControlService {
+  // 接続直後に現在の遮断リスト全体 (SNAPSHOT) を送り、以降は追加・解除を送り続ける。
+  rpc WatchBlocklist (WatchBlocklistRequest) returns (stream BlocklistEvent);
+}
+
+message WatchBlocklistRequest {}
+
+message BlockEntry {
+  string target_type = 1;        // 現在は "ip" のみ
+  string target = 2;             // 例: "203.0.113.9"
+  string reason = 3;
+  string source = 4;             // "jev_level4" (自動遮断) / "approval" (承認) / "admin" (手動)
+  int64 expires_at_unix_ms = 5;  // 遮断の期限 (UNIX ミリ秒)。0 なら無期限
+}
+
+message BlocklistEvent {
+  enum Kind {
+    KIND_UNSPECIFIED = 0;
+    SNAPSHOT = 1;  // entries が遮断リスト全体 (受信側は置き換える)
+    ADDED = 2;     // entries を追加 (同じ対象があれば上書き)
+    REMOVED = 3;   // entries を解除
+  }
+  Kind kind = 1;
+  repeated BlockEntry entries = 2;
+}

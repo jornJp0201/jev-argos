@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { describe, it } from "node:test";
 import { createExpressMiddleware, withJevArgos, type ExpressLikeRequest } from "../middleware.js";
+import type { BlockChecker } from "../blocklist.js";
 import type { Reporter } from "../reporter.js";
 import type { SecuritySignal } from "../signal.js";
 
@@ -9,6 +10,19 @@ class MemoryReporter implements Reporter {
   signals: SecuritySignal[] = [];
   report(s: SecuritySignal): void {
     this.signals.push(s);
+  }
+}
+
+class FakeResponse extends EventEmitter {
+  statusCode = 200;
+  headers: Record<string, string> = {};
+  body: string | undefined;
+  setHeader(name: string, value: string) {
+    this.headers[name] = value;
+  }
+  end(chunk: string) {
+    this.body = chunk;
+    this.emit("finish");
   }
 }
 
@@ -20,7 +34,7 @@ function fakeExpress(overrides: Partial<ExpressLikeRequest> = {}) {
     get: (name) => (name === "user-agent" ? "curl/8.7" : undefined),
     ...overrides,
   };
-  const res = Object.assign(new EventEmitter(), { statusCode: 200 });
+  const res = new FakeResponse();
   return { req, res };
 }
 
@@ -95,5 +109,55 @@ describe("withJevArgos", () => {
     const handler = withJevArgos(reporter, { ...opts, getClientIp: () => "192.0.2.1" }, () => new Response("ok"));
     await handler(new Request("http://localhost/x", { headers: { "x-forwarded-for": "6.6.6.6" } }));
     assert.equal(reporter.signals[0]!.user_context.client_ip, "192.0.2.1");
+  });
+});
+
+const blockOnly = (ip: string): BlockChecker => ({ isBlocked: (x) => x === ip });
+
+describe("blocking", () => {
+  it("Express: rejects blocked IPs with 403 without calling next, and still reports", () => {
+    const reporter = new MemoryReporter();
+    const mw = createExpressMiddleware(reporter, { sourceService: "bff", blocklist: blockOnly("198.51.100.7") });
+    const { req, res } = fakeExpress(); // req.ip は "::ffff:198.51.100.7" (正規化して照合する)
+    let nextCalled = false;
+    mw(req, res, () => (nextCalled = true));
+
+    assert.equal(nextCalled, false);
+    assert.equal(res.statusCode, 403);
+    assert.equal(res.body, JSON.stringify({ error: "forbidden" }));
+    assert.equal(reporter.signals[0]!.response_context.status_code, 7);
+  });
+
+  it("Express: lets other IPs through and supports a custom response", () => {
+    const reporter = new MemoryReporter();
+    const { req, res } = fakeExpress({ ip: "10.0.0.1" });
+    let nextCalled = false;
+    createExpressMiddleware(reporter, { sourceService: "bff", blocklist: blockOnly("198.51.100.7") })(req, res, () => (nextCalled = true));
+    assert.ok(nextCalled);
+
+    const blocked = fakeExpress();
+    createExpressMiddleware(reporter, {
+      sourceService: "bff",
+      blocklist: blockOnly("198.51.100.7"),
+      onBlocked: (_req, r) => {
+        r.statusCode = 429;
+        r.end("slow down");
+      },
+    })(blocked.req, blocked.res, () => {});
+    assert.equal(blocked.res.statusCode, 429);
+    assert.equal(blocked.res.body, "slow down");
+  });
+
+  it("Next.js: returns 403 without calling the handler", async () => {
+    const reporter = new MemoryReporter();
+    let called = false;
+    const handler = withJevArgos(reporter, { route: "/x", sourceService: "bff", blocklist: blockOnly("203.0.113.9") }, () => {
+      called = true;
+      return new Response("ok");
+    });
+    const res = await handler(new Request("http://localhost/x", { headers: { "x-forwarded-for": "203.0.113.9" } }));
+    assert.equal(res.status, 403);
+    assert.equal(called, false);
+    assert.equal(reporter.signals[0]!.response_context.status_code, 7);
   });
 });

@@ -159,3 +159,114 @@ var SignalService_ServiceDesc = grpc.ServiceDesc{
 	},
 	Metadata: "signal.proto",
 }
+
+const (
+	ControlService_WatchBlocklist_FullMethodName = "/jevargos.v1.ControlService/WatchBlocklist"
+)
+
+// ControlServiceClient is the client API for ControlService service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+//
+// 遮断リストの配信サービス。アダプターが購読し、遮断中の送信元からのリクエストをアプリ側で拒否する。
+type ControlServiceClient interface {
+	// 接続直後に現在の遮断リスト全体 (SNAPSHOT) を送り、以降は追加・解除を送り続ける。
+	WatchBlocklist(ctx context.Context, in *WatchBlocklistRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[BlocklistEvent], error)
+}
+
+type controlServiceClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewControlServiceClient(cc grpc.ClientConnInterface) ControlServiceClient {
+	return &controlServiceClient{cc}
+}
+
+func (c *controlServiceClient) WatchBlocklist(ctx context.Context, in *WatchBlocklistRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[BlocklistEvent], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &ControlService_ServiceDesc.Streams[0], ControlService_WatchBlocklist_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[WatchBlocklistRequest, BlocklistEvent]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type ControlService_WatchBlocklistClient = grpc.ServerStreamingClient[BlocklistEvent]
+
+// ControlServiceServer is the server API for ControlService service.
+// All implementations must embed UnimplementedControlServiceServer
+// for forward compatibility.
+//
+// 遮断リストの配信サービス。アダプターが購読し、遮断中の送信元からのリクエストをアプリ側で拒否する。
+type ControlServiceServer interface {
+	// 接続直後に現在の遮断リスト全体 (SNAPSHOT) を送り、以降は追加・解除を送り続ける。
+	WatchBlocklist(*WatchBlocklistRequest, grpc.ServerStreamingServer[BlocklistEvent]) error
+	mustEmbedUnimplementedControlServiceServer()
+}
+
+// UnimplementedControlServiceServer must be embedded to have
+// forward compatible implementations.
+//
+// NOTE: this should be embedded by value instead of pointer to avoid a nil
+// pointer dereference when methods are called.
+type UnimplementedControlServiceServer struct{}
+
+func (UnimplementedControlServiceServer) WatchBlocklist(*WatchBlocklistRequest, grpc.ServerStreamingServer[BlocklistEvent]) error {
+	return status.Errorf(codes.Unimplemented, "method WatchBlocklist not implemented")
+}
+func (UnimplementedControlServiceServer) mustEmbedUnimplementedControlServiceServer() {}
+func (UnimplementedControlServiceServer) testEmbeddedByValue()                        {}
+
+// UnsafeControlServiceServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to ControlServiceServer will
+// result in compilation errors.
+type UnsafeControlServiceServer interface {
+	mustEmbedUnimplementedControlServiceServer()
+}
+
+func RegisterControlServiceServer(s grpc.ServiceRegistrar, srv ControlServiceServer) {
+	// If the following call pancis, it indicates UnimplementedControlServiceServer was
+	// embedded by pointer and is nil.  This will cause panics if an
+	// unimplemented method is ever invoked, so we test this at initialization
+	// time to prevent it from happening at runtime later due to I/O.
+	if t, ok := srv.(interface{ testEmbeddedByValue() }); ok {
+		t.testEmbeddedByValue()
+	}
+	s.RegisterService(&ControlService_ServiceDesc, srv)
+}
+
+func _ControlService_WatchBlocklist_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(WatchBlocklistRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(ControlServiceServer).WatchBlocklist(m, &grpc.GenericServerStream[WatchBlocklistRequest, BlocklistEvent]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type ControlService_WatchBlocklistServer = grpc.ServerStreamingServer[BlocklistEvent]
+
+// ControlService_ServiceDesc is the grpc.ServiceDesc for ControlService service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var ControlService_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "jevargos.v1.ControlService",
+	HandlerType: (*ControlServiceServer)(nil),
+	Methods:     []grpc.MethodDesc{},
+	Streams: []grpc.StreamDesc{
+		{
+			StreamName:    "WatchBlocklist",
+			Handler:       _ControlService_WatchBlocklist_Handler,
+			ServerStreams: true,
+		},
+	},
+	Metadata: "signal.proto",
+}

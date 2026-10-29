@@ -1,10 +1,12 @@
+export { BlocklistWatcher, type BlockChecker, type BlockEntry, type BlocklistWatcherOptions } from "./blocklist.js";
 export { buildHttpSignal, httpStatusToGrpc, reportHttp, type HttpObservation, type HttpSignalOptions } from "./http.js";
-export { createClientInterceptor, createServerInterceptor } from "./interceptor.js";
+export { createClientInterceptor, createServerInterceptor, type ServerInterceptorOptions } from "./interceptor.js";
 export {
   createExpressMiddleware,
   withJevArgos,
   type ExpressLikeRequest,
   type ExpressLikeResponse,
+  type ExpressMiddlewareOptions,
   type RouteHandlerOptions,
 } from "./middleware.js";
 export { SignalReporter, type Reporter, type ReporterOptions, type ReporterStats } from "./reporter.js";

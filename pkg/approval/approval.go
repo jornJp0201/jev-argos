@@ -30,11 +30,53 @@ const (
 )
 
 // ActionType は提案する対処の種類。
+//
+// [差し替えポイント] アプリ固有の対処を追加する場合は、ここに種類を足し、
+// action.Router (cmd/jev-argos-server の newExecutor) で実行方法を登録する。
 type ActionType string
 
 const (
-	// ActionBlockIP は送信元 IP の一時遮断。
+	// ActionBlockIP は送信元 IP の一時遮断 (遮断リストに登録し、アダプターが拒否する)。
 	ActionBlockIP ActionType = "block_ip"
+	// 以下はアプリへ Webhook で実行を依頼する (action.WebhookExecutor)。
+	ActionRevokeSession  ActionType = "revoke_session"  // セッション / トークンの無効化
+	ActionEnableFallback ActionType = "enable_fallback" // 縮小運転 (フォールバック) への切り替え
+	ActionSuspendAccount ActionType = "suspend_account" // アカウントの一時停止
+	ActionDeleteAccount  ActionType = "delete_account"  // アカウントの永久削除 (不可逆)
+	ActionDeleteData     ActionType = "delete_data"     // データの削除 (不可逆)
+	ActionStopService    ActionType = "stop_service"    // サービス全体の停止 (不可逆)
+)
+
+// ActionTypes は既知のアクションの種類。
+var ActionTypes = []ActionType{
+	ActionBlockIP, ActionRevokeSession, ActionEnableFallback, ActionSuspendAccount,
+	ActionDeleteAccount, ActionDeleteData, ActionStopService,
+}
+
+// Known は既知のアクションの種類か。
+func (t ActionType) Known() bool {
+	for _, k := range ActionTypes {
+		if t == k {
+			return true
+		}
+	}
+	return false
+}
+
+// Irreversible は取り消せない操作か (設計書 6.2: 管理者の承認を必須とし、画面で強い確認を求める)。
+func (t ActionType) Irreversible() bool {
+	switch t {
+	case ActionDeleteAccount, ActionDeleteData, ActionStopService:
+		return true
+	}
+	return false
+}
+
+// 提案の出どころ。
+const (
+	SourceJev   = "jev"   // Jev の Level 3 判定
+	SourceLLM   = "llm"   // LLM 分析の推奨
+	SourceAdmin = "admin" // 管理者が手動で起票
 )
 
 // Evidence は提案の根拠となった判定結果のスナップショット。
@@ -58,8 +100,10 @@ type Action struct {
 	ID             string     `json:"action_id"`
 	SignalID       string     `json:"signal_id"` // 最新の根拠シグナル
 	ProposedAction ActionType `json:"proposed_action"`
-	Target         string     `json:"target"` // 対処の対象 (block_ip なら IP)
+	Target         string     `json:"target"` // 対処の対象 (block_ip なら IP、アカウント操作ならユーザー ID)
 	Reason         string     `json:"reason"`
+	Source         string     `json:"source"` // 提案の出どころ (SourceJev / SourceLLM / SourceAdmin)
+	Irreversible   bool       `json:"irreversible"`
 	Status         Status     `json:"status"`
 	Evidence       Evidence   `json:"evidence"`
 	EventCount     int        `json:"event_count"` // 承認待ちの間に同じ対象で発生した判定数
@@ -68,6 +112,9 @@ type Action struct {
 	DecidedAt      *time.Time `json:"decided_at,omitempty"`
 	DecidedBy      string     `json:"decided_by,omitempty"`
 	DecisionNote   string     `json:"decision_note,omitempty"`
+	// 承認後の実行結果。ExecutedAt が nil なら未実行 (拒否・実行待ち)。
+	ExecutedAt     *time.Time `json:"executed_at,omitempty"`
+	ExecutionError string     `json:"execution_error,omitempty"`
 }
 
 // Proposal は新しいアクションの提案。
@@ -76,6 +123,7 @@ type Proposal struct {
 	ProposedAction ActionType
 	Target         string
 	Reason         string
+	Source         string // 空なら SourceJev
 	Evidence       Evidence
 }
 
@@ -95,6 +143,8 @@ type Store interface {
 	// Decide は承認待ちのアクションを承認 / 拒否する。
 	// 決定済みなら ErrAlreadyDecided と現在のアクションを返す。
 	Decide(ctx context.Context, id string, approve bool, decidedBy, note string) (Action, error)
+	// RecordExecution は承認されたアクションの実行結果を記録する (execErr が nil なら成功)。
+	RecordExecution(ctx context.Context, id string, execErr error) (Action, error)
 	// Subscribe はアクションの作成・更新の通知を受け取るチャネルを返す。cancel で購読を解除する。
 	Subscribe() (updates <-chan Action, cancel func())
 }
@@ -160,6 +210,8 @@ func (s *MemoryStore) Propose(_ context.Context, p Proposal) (Action, error) {
 		ProposedAction: p.ProposedAction,
 		Target:         p.Target,
 		Reason:         p.Reason,
+		Source:         sourceOrDefault(p.Source),
+		Irreversible:   p.ProposedAction.Irreversible(),
 		Status:         StatusPending,
 		Evidence:       p.Evidence,
 		EventCount:     1,
@@ -220,6 +272,32 @@ func (s *MemoryStore) Decide(_ context.Context, id string, approve bool, decided
 	delete(s.pendingKeys, pendingKey(a.ProposedAction, a.Target))
 	s.notify(*a)
 	return *a, nil
+}
+
+func (s *MemoryStore) RecordExecution(_ context.Context, id string, execErr error) (Action, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	a, ok := s.actions[id]
+	if !ok {
+		return Action{}, ErrNotFound
+	}
+	now := s.now()
+	a.ExecutedAt = &now
+	a.ExecutionError = ""
+	if execErr != nil {
+		a.ExecutionError = execErr.Error()
+	}
+	a.UpdatedAt = now
+	s.notify(*a)
+	return *a, nil
+}
+
+func sourceOrDefault(s string) string {
+	if s == "" {
+		return SourceJev
+	}
+	return s
 }
 
 func (s *MemoryStore) Subscribe() (<-chan Action, func()) {
@@ -327,6 +405,9 @@ func reason(e receiver.Event) string {
 }
 
 // Executor は承認されたアクションを実行する。
+//
+// [差し替えポイント] 実装は pkg/action (BlocklistExecutor / WebhookExecutor / Router) にある。
+// 独自の実行方法を使う場合はこのインターフェースを実装する。
 type Executor interface {
 	Execute(ctx context.Context, a Action) error
 }

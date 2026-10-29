@@ -9,8 +9,17 @@
 // どちらもシグナルの組み立て・送信で起きた例外は握りつぶし、アプリの RPC には影響させない。
 
 import * as grpc from "@grpc/grpc-js";
+import type { BlockChecker } from "./blocklist.js";
 import type { Reporter } from "./reporter.js";
-import { buildSignal, normalizeIp, type CallObservation, type SignalOptions } from "./signal.js";
+import { buildSignal, normalizeIp, resolveClientIp, type CallObservation, type SignalOptions } from "./signal.js";
+
+export interface ServerInterceptorOptions extends SignalOptions {
+  /**
+   * 遮断リスト (通常は BlocklistWatcher)。指定すると、遮断中の IP からの RPC を
+   * PERMISSION_DENIED で拒否する (アプリのハンドラーは呼ばれない)。
+   */
+  blocklist?: BlockChecker | undefined;
+}
 
 function reportSafely(reporter: Reporter, obs: CallObservation, opts: SignalOptions): void {
   try {
@@ -21,21 +30,21 @@ function reportSafely(reporter: Reporter, obs: CallObservation, opts: SignalOpti
 }
 
 /** gRPC サーバー用インターセプター。`new grpc.Server({ interceptors: [...] })` に渡す。 */
-export function createServerInterceptor(reporter: Reporter, opts: SignalOptions): grpc.ServerInterceptor {
+export function createServerInterceptor(reporter: Reporter, opts: ServerInterceptorOptions): grpc.ServerInterceptor {
   return (methodDescriptor, call) => {
     const startedAt = performance.now();
     let metadata = new grpc.Metadata();
     let reported = false;
+    let connectionIp = "";
+    try {
+      connectionIp = normalizeIp(call.getConnectionInfo().remoteAddress);
+    } catch {
+      // 接続情報が取れなくても処理と送信は続ける
+    }
 
     const finish = (statusCode: number, details: string) => {
       if (reported) return;
       reported = true;
-      let connectionIp = "";
-      try {
-        connectionIp = normalizeIp(call.getConnectionInfo().remoteAddress);
-      } catch {
-        // 接続情報が取れなくても送信は続ける
-      }
       reportSafely(
         reporter,
         {
@@ -55,6 +64,12 @@ export function createServerInterceptor(reporter: Reporter, opts: SignalOptions)
         next({
           onReceiveMetadata: (md, nextMd) => {
             metadata = md;
+            if (opts.blocklist?.isBlocked(resolveClientIp(md, connectionIp, opts.trustProxyHeaders))) {
+              // 遮断中の送信元: ハンドラーへ進ませずに拒否する (この RPC もシグナルとして送る)
+              finish(grpc.status.PERMISSION_DENIED, "blocked by jev-argos");
+              call.sendStatus({ code: grpc.status.PERMISSION_DENIED, details: "blocked by jev-argos" });
+              return;
+            }
             nextMd(md);
           },
           // クライアントの切断・期限切れでは sendStatus が呼ばれないため、ここで記録する

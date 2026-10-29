@@ -113,3 +113,54 @@ export function say(
 ): Promise<{ err: grpc.ServiceError | null; res?: Buffer | undefined }> {
   return new Promise((resolve) => client.Say(Buffer.from(body), md, opts, (err, res) => resolve({ err, res })));
 }
+
+// --- 遮断リスト配信 (ControlService.WatchBlocklist) の擬似サーバー ---
+
+export interface FakeBlockEntry {
+  target_type: string;
+  target: string;
+  reason: string;
+  source: string;
+  expires_at_unix_ms: number;
+}
+
+export interface ControlFake {
+  target: string;
+  /** 接続中のストリームすべてにイベントを送る。 */
+  push(kind: "ADDED" | "REMOVED", entries: FakeBlockEntry[]): void;
+  /** 接続中のストリームをサーバー側から終了する (再接続の確認用)。 */
+  endStreams(): void;
+  connections: number;
+  close(): void;
+}
+
+export async function startControl(initial: FakeBlockEntry[] = []): Promise<ControlFake> {
+  const def = protoLoader.loadSync(PROTO_PATH, { keepCase: true, longs: Number, enums: String, defaults: true });
+  const pkg = grpc.loadPackageDefinition(def) as any;
+  const streams = new Set<grpc.ServerWritableStream<object, object>>();
+  const state: FakeBlockEntry[] = [...initial];
+  const fake = {
+    target: "",
+    connections: 0,
+    push(kind: "ADDED" | "REMOVED", entries: FakeBlockEntry[]) {
+      for (const s of streams) s.write({ kind, entries });
+    },
+    endStreams() {
+      for (const s of streams) s.end();
+      streams.clear();
+    },
+    close: () => server.forceShutdown(),
+  };
+  const server = new grpc.Server();
+  server.addService(pkg.jevargos.v1.ControlService.service, {
+    WatchBlocklist: (call: grpc.ServerWritableStream<object, object>) => {
+      fake.connections++;
+      streams.add(call);
+      call.on("cancelled", () => streams.delete(call));
+      call.write({ kind: "SNAPSHOT", entries: state });
+    },
+  });
+  const port = await bind(server);
+  fake.target = `127.0.0.1:${port}`;
+  return fake;
+}

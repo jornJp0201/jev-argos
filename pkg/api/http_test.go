@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jev-argos/jev-argos/pkg/action"
 	"github.com/jev-argos/jev-argos/pkg/approval"
 )
 
@@ -270,5 +272,154 @@ func TestStream(t *testing.T) {
 	do(t, srv, "POST", "/api/actions/"+a.ID+"/approve", `{"decided_by":"alice"}`, token)
 	if got := readEvent(); got.ID != a.ID || got.Status != approval.StatusApproved {
 		t.Errorf("second event = %+v", got)
+	}
+}
+
+type failingExecutor struct{}
+
+func (failingExecutor) Execute(context.Context, approval.Action) error {
+	return errors.New("webhook 503")
+}
+
+func setupWith(t *testing.T, exec approval.Executor, bl action.Blocklist) (*httptest.Server, *approval.MemoryStore) {
+	t.Helper()
+	store := approval.NewMemoryStore()
+	h, err := NewHandler(Config{
+		Store: store, Executor: exec, Blocklist: bl, AdminToken: token,
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(h)
+	t.Cleanup(srv.Close)
+	return srv, store
+}
+
+func TestCreateAction(t *testing.T) {
+	srv, _, _ := setup(t)
+
+	resp, body := do(t, srv, "POST", "/api/actions",
+		`{"proposed_action":"delete_account","target":"user-42","reason":"アカウント乗っ取りを確認","created_by":"alice"}`, token)
+	var a approval.Action
+	json.Unmarshal(body, &a)
+	if resp.StatusCode != http.StatusCreated || a.Status != approval.StatusPending || a.Source != approval.SourceAdmin ||
+		!a.Irreversible || a.Target != "user-42" || !strings.Contains(a.Reason, "alice") {
+		t.Errorf("create: %d %s", resp.StatusCode, body)
+	}
+
+	for _, bad := range []string{
+		`{"proposed_action":"format_disk","target":"x","reason":"r","created_by":"a"}`,
+		`{"proposed_action":"block_ip","target":"","reason":"r","created_by":"a"}`,
+		`{"proposed_action":"block_ip","target":"1.2.3.4","reason":"","created_by":"a"}`,
+		`{"proposed_action":"block_ip","target":"1.2.3.4","reason":"r","created_by":""}`,
+	} {
+		if resp, _ := do(t, srv, "POST", "/api/actions", bad, token); resp.StatusCode != 400 {
+			t.Errorf("%s: status %d, want 400", bad, resp.StatusCode)
+		}
+	}
+}
+
+func TestApprove_RecordsExecutionResult(t *testing.T) {
+	srv, store := setupWith(t, failingExecutor{}, nil)
+	a := propose(t, store, "10.0.0.1")
+
+	_, body := do(t, srv, "POST", "/api/actions/"+a.ID+"/approve", `{"decided_by":"alice"}`, token)
+	var got approval.Action
+	json.Unmarshal(body, &got)
+	if got.Status != approval.StatusApproved || got.ExecutedAt == nil || got.ExecutionError != "webhook 503" {
+		t.Errorf("approved action = %s", body)
+	}
+
+	srv2, store2, _ := setup(t)
+	b := propose(t, store2, "10.0.0.2")
+	_, body = do(t, srv2, "POST", "/api/actions/"+b.ID+"/approve", `{"decided_by":"alice"}`, token)
+	var ok approval.Action
+	json.Unmarshal(body, &ok)
+	if ok.ExecutedAt == nil || ok.ExecutionError != "" {
+		t.Errorf("successful execution = %s", body)
+	}
+}
+
+func TestBlocklistEndpoints(t *testing.T) {
+	bl := action.NewMemoryBlocklist()
+	srv, _ := setupWith(t, nil, bl)
+
+	if resp, _ := do(t, srv, "GET", "/api/blocklist", "", ""); resp.StatusCode != 401 {
+		t.Errorf("unauthenticated list: %d", resp.StatusCode)
+	}
+
+	resp, body := do(t, srv, "POST", "/api/blocklist", `{"target":"203.0.113.9","reason":"manual","ttl_seconds":60,"created_by":"alice"}`, token)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("block: %d %s", resp.StatusCode, body)
+	}
+	if ok, _ := bl.IsBlocked(context.Background(), action.TargetIP, "203.0.113.9"); !ok {
+		t.Error("not blocked")
+	}
+
+	for _, bad := range []string{
+		`{"target":"not-an-ip","created_by":"a"}`,
+		`{"target":"1.2.3.4","created_by":""}`,
+		`{"target":"1.2.3.4","created_by":"a","ttl_seconds":-1}`,
+		`{"target":"1.2.3.4","created_by":"a","ttl_seconds":99999999}`,
+	} {
+		if resp, _ := do(t, srv, "POST", "/api/blocklist", bad, token); resp.StatusCode != 400 {
+			t.Errorf("%s: status %d, want 400", bad, resp.StatusCode)
+		}
+	}
+
+	_, body = do(t, srv, "GET", "/api/blocklist", "", token)
+	var list struct{ Entries []action.Entry }
+	json.Unmarshal(body, &list)
+	if len(list.Entries) != 1 || list.Entries[0].Source != action.SourceAdmin {
+		t.Errorf("list = %s", body)
+	}
+
+	if resp, _ := do(t, srv, "DELETE", "/api/blocklist?target=203.0.113.9", "", token); resp.StatusCode != http.StatusNoContent {
+		t.Errorf("unblock: %d", resp.StatusCode)
+	}
+	if ok, _ := bl.IsBlocked(context.Background(), action.TargetIP, "203.0.113.9"); ok {
+		t.Error("still blocked")
+	}
+	if resp, _ := do(t, srv, "DELETE", "/api/blocklist", "", token); resp.StatusCode != 400 {
+		t.Errorf("unblock without target: %d", resp.StatusCode)
+	}
+}
+
+func TestBlocklistEndpoints_DisabledWithoutBlocklist(t *testing.T) {
+	srv, _, _ := setup(t)
+	if resp, _ := do(t, srv, "GET", "/api/blocklist", "", token); resp.StatusCode != 404 {
+		t.Errorf("status %d, want 404", resp.StatusCode)
+	}
+}
+
+func TestBlocklistStream(t *testing.T) {
+	bl := action.NewMemoryBlocklist()
+	srv, _ := setupWith(t, nil, bl)
+
+	sctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	req, _ := http.NewRequestWithContext(sctx, "GET", srv.URL+"/api/blocklist/stream", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	reader := bufio.NewReader(resp.Body)
+	reader.ReadString('\n') // ": connected"
+
+	bl.Block(context.Background(), action.Entry{TargetType: action.TargetIP, Target: "10.0.0.1", Source: action.SourceLevel4})
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.HasPrefix(line, "data: ") {
+			if !strings.Contains(line, `"kind":"added"`) || !strings.Contains(line, `"target":"10.0.0.1"`) {
+				t.Errorf("event = %s", line)
+			}
+			return
+		}
 	}
 }

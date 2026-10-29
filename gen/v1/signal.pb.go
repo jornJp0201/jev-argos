@@ -21,6 +21,58 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+type BlocklistEvent_Kind int32
+
+const (
+	BlocklistEvent_KIND_UNSPECIFIED BlocklistEvent_Kind = 0
+	BlocklistEvent_SNAPSHOT         BlocklistEvent_Kind = 1 // entries が遮断リスト全体 (受信側は置き換える)
+	BlocklistEvent_ADDED            BlocklistEvent_Kind = 2 // entries を追加 (同じ対象があれば上書き)
+	BlocklistEvent_REMOVED          BlocklistEvent_Kind = 3 // entries を解除
+)
+
+// Enum value maps for BlocklistEvent_Kind.
+var (
+	BlocklistEvent_Kind_name = map[int32]string{
+		0: "KIND_UNSPECIFIED",
+		1: "SNAPSHOT",
+		2: "ADDED",
+		3: "REMOVED",
+	}
+	BlocklistEvent_Kind_value = map[string]int32{
+		"KIND_UNSPECIFIED": 0,
+		"SNAPSHOT":         1,
+		"ADDED":            2,
+		"REMOVED":          3,
+	}
+)
+
+func (x BlocklistEvent_Kind) Enum() *BlocklistEvent_Kind {
+	p := new(BlocklistEvent_Kind)
+	*p = x
+	return p
+}
+
+func (x BlocklistEvent_Kind) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (BlocklistEvent_Kind) Descriptor() protoreflect.EnumDescriptor {
+	return file_signal_proto_enumTypes[0].Descriptor()
+}
+
+func (BlocklistEvent_Kind) Type() protoreflect.EnumType {
+	return &file_signal_proto_enumTypes[0]
+}
+
+func (x BlocklistEvent_Kind) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use BlocklistEvent_Kind.Descriptor instead.
+func (BlocklistEvent_Kind) EnumDescriptor() ([]byte, []int) {
+	return file_signal_proto_rawDescGZIP(), []int{7, 0}
+}
+
 // メインのシグナル構造体
 type SecuritySignal struct {
 	state           protoimpl.MessageState `protogen:"open.v1"`
@@ -382,6 +434,170 @@ func (x *ReportResponse) GetImmediateActionLevel() int32 {
 	return 0
 }
 
+type WatchBlocklistRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *WatchBlocklistRequest) Reset() {
+	*x = WatchBlocklistRequest{}
+	mi := &file_signal_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *WatchBlocklistRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*WatchBlocklistRequest) ProtoMessage() {}
+
+func (x *WatchBlocklistRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_signal_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use WatchBlocklistRequest.ProtoReflect.Descriptor instead.
+func (*WatchBlocklistRequest) Descriptor() ([]byte, []int) {
+	return file_signal_proto_rawDescGZIP(), []int{5}
+}
+
+type BlockEntry struct {
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	TargetType      string                 `protobuf:"bytes,1,opt,name=target_type,json=targetType,proto3" json:"target_type,omitempty"` // 現在は "ip" のみ
+	Target          string                 `protobuf:"bytes,2,opt,name=target,proto3" json:"target,omitempty"`                           // 例: "203.0.113.9"
+	Reason          string                 `protobuf:"bytes,3,opt,name=reason,proto3" json:"reason,omitempty"`
+	Source          string                 `protobuf:"bytes,4,opt,name=source,proto3" json:"source,omitempty"`                                               // "jev_level4" (自動遮断) / "approval" (承認) / "admin" (手動)
+	ExpiresAtUnixMs int64                  `protobuf:"varint,5,opt,name=expires_at_unix_ms,json=expiresAtUnixMs,proto3" json:"expires_at_unix_ms,omitempty"` // 遮断の期限 (UNIX ミリ秒)。0 なら無期限
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *BlockEntry) Reset() {
+	*x = BlockEntry{}
+	mi := &file_signal_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *BlockEntry) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*BlockEntry) ProtoMessage() {}
+
+func (x *BlockEntry) ProtoReflect() protoreflect.Message {
+	mi := &file_signal_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use BlockEntry.ProtoReflect.Descriptor instead.
+func (*BlockEntry) Descriptor() ([]byte, []int) {
+	return file_signal_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *BlockEntry) GetTargetType() string {
+	if x != nil {
+		return x.TargetType
+	}
+	return ""
+}
+
+func (x *BlockEntry) GetTarget() string {
+	if x != nil {
+		return x.Target
+	}
+	return ""
+}
+
+func (x *BlockEntry) GetReason() string {
+	if x != nil {
+		return x.Reason
+	}
+	return ""
+}
+
+func (x *BlockEntry) GetSource() string {
+	if x != nil {
+		return x.Source
+	}
+	return ""
+}
+
+func (x *BlockEntry) GetExpiresAtUnixMs() int64 {
+	if x != nil {
+		return x.ExpiresAtUnixMs
+	}
+	return 0
+}
+
+type BlocklistEvent struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Kind          BlocklistEvent_Kind    `protobuf:"varint,1,opt,name=kind,proto3,enum=jevargos.v1.BlocklistEvent_Kind" json:"kind,omitempty"`
+	Entries       []*BlockEntry          `protobuf:"bytes,2,rep,name=entries,proto3" json:"entries,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *BlocklistEvent) Reset() {
+	*x = BlocklistEvent{}
+	mi := &file_signal_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *BlocklistEvent) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*BlocklistEvent) ProtoMessage() {}
+
+func (x *BlocklistEvent) ProtoReflect() protoreflect.Message {
+	mi := &file_signal_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use BlocklistEvent.ProtoReflect.Descriptor instead.
+func (*BlocklistEvent) Descriptor() ([]byte, []int) {
+	return file_signal_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *BlocklistEvent) GetKind() BlocklistEvent_Kind {
+	if x != nil {
+		return x.Kind
+	}
+	return BlocklistEvent_KIND_UNSPECIFIED
+}
+
+func (x *BlocklistEvent) GetEntries() []*BlockEntry {
+	if x != nil {
+		return x.Entries
+	}
+	return nil
+}
+
 var File_signal_proto protoreflect.FileDescriptor
 
 const file_signal_proto_rawDesc = "" +
@@ -420,10 +636,29 @@ const file_signal_proto_rawDesc = "" +
 	"latency_ms\x18\x04 \x01(\x03R\tlatencyMs\"b\n" +
 	"\x0eReportResponse\x12\x1a\n" +
 	"\baccepted\x18\x01 \x01(\bR\baccepted\x124\n" +
-	"\x16immediate_action_level\x18\x02 \x01(\x05R\x14immediateActionLevel2\xa6\x01\n" +
+	"\x16immediate_action_level\x18\x02 \x01(\x05R\x14immediateActionLevel\"\x17\n" +
+	"\x15WatchBlocklistRequest\"\xa2\x01\n" +
+	"\n" +
+	"BlockEntry\x12\x1f\n" +
+	"\vtarget_type\x18\x01 \x01(\tR\n" +
+	"targetType\x12\x16\n" +
+	"\x06target\x18\x02 \x01(\tR\x06target\x12\x16\n" +
+	"\x06reason\x18\x03 \x01(\tR\x06reason\x12\x16\n" +
+	"\x06source\x18\x04 \x01(\tR\x06source\x12+\n" +
+	"\x12expires_at_unix_ms\x18\x05 \x01(\x03R\x0fexpiresAtUnixMs\"\xbd\x01\n" +
+	"\x0eBlocklistEvent\x124\n" +
+	"\x04kind\x18\x01 \x01(\x0e2 .jevargos.v1.BlocklistEvent.KindR\x04kind\x121\n" +
+	"\aentries\x18\x02 \x03(\v2\x17.jevargos.v1.BlockEntryR\aentries\"B\n" +
+	"\x04Kind\x12\x14\n" +
+	"\x10KIND_UNSPECIFIED\x10\x00\x12\f\n" +
+	"\bSNAPSHOT\x10\x01\x12\t\n" +
+	"\x05ADDED\x10\x02\x12\v\n" +
+	"\aREMOVED\x10\x032\xa6\x01\n" +
 	"\rSignalService\x12H\n" +
 	"\fReportSignal\x12\x1b.jevargos.v1.SecuritySignal\x1a\x1b.jevargos.v1.ReportResponse\x12K\n" +
-	"\rStreamSignals\x12\x1b.jevargos.v1.SecuritySignal\x1a\x1b.jevargos.v1.ReportResponse(\x01B2Z0github.com/jev-argos/jev-argos/gen/v1;jevargosv1b\x06proto3"
+	"\rStreamSignals\x12\x1b.jevargos.v1.SecuritySignal\x1a\x1b.jevargos.v1.ReportResponse(\x012e\n" +
+	"\x0eControlService\x12S\n" +
+	"\x0eWatchBlocklist\x12\".jevargos.v1.WatchBlocklistRequest\x1a\x1b.jevargos.v1.BlocklistEvent0\x01B2Z0github.com/jev-argos/jev-argos/gen/v1;jevargosv1b\x06proto3"
 
 var (
 	file_signal_proto_rawDescOnce sync.Once
@@ -437,29 +672,38 @@ func file_signal_proto_rawDescGZIP() []byte {
 	return file_signal_proto_rawDescData
 }
 
-var file_signal_proto_msgTypes = make([]protoimpl.MessageInfo, 6)
+var file_signal_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
+var file_signal_proto_msgTypes = make([]protoimpl.MessageInfo, 9)
 var file_signal_proto_goTypes = []any{
-	(*SecuritySignal)(nil),  // 0: jevargos.v1.SecuritySignal
-	(*UserContext)(nil),     // 1: jevargos.v1.UserContext
-	(*RequestContext)(nil),  // 2: jevargos.v1.RequestContext
-	(*ResponseContext)(nil), // 3: jevargos.v1.ResponseContext
-	(*ReportResponse)(nil),  // 4: jevargos.v1.ReportResponse
-	nil,                     // 5: jevargos.v1.RequestContext.MetadataMaskedEntry
+	(BlocklistEvent_Kind)(0),      // 0: jevargos.v1.BlocklistEvent.Kind
+	(*SecuritySignal)(nil),        // 1: jevargos.v1.SecuritySignal
+	(*UserContext)(nil),           // 2: jevargos.v1.UserContext
+	(*RequestContext)(nil),        // 3: jevargos.v1.RequestContext
+	(*ResponseContext)(nil),       // 4: jevargos.v1.ResponseContext
+	(*ReportResponse)(nil),        // 5: jevargos.v1.ReportResponse
+	(*WatchBlocklistRequest)(nil), // 6: jevargos.v1.WatchBlocklistRequest
+	(*BlockEntry)(nil),            // 7: jevargos.v1.BlockEntry
+	(*BlocklistEvent)(nil),        // 8: jevargos.v1.BlocklistEvent
+	nil,                           // 9: jevargos.v1.RequestContext.MetadataMaskedEntry
 }
 var file_signal_proto_depIdxs = []int32{
-	1, // 0: jevargos.v1.SecuritySignal.user_context:type_name -> jevargos.v1.UserContext
-	2, // 1: jevargos.v1.SecuritySignal.request_context:type_name -> jevargos.v1.RequestContext
-	3, // 2: jevargos.v1.SecuritySignal.response_context:type_name -> jevargos.v1.ResponseContext
-	5, // 3: jevargos.v1.RequestContext.metadata_masked:type_name -> jevargos.v1.RequestContext.MetadataMaskedEntry
-	0, // 4: jevargos.v1.SignalService.ReportSignal:input_type -> jevargos.v1.SecuritySignal
-	0, // 5: jevargos.v1.SignalService.StreamSignals:input_type -> jevargos.v1.SecuritySignal
-	4, // 6: jevargos.v1.SignalService.ReportSignal:output_type -> jevargos.v1.ReportResponse
-	4, // 7: jevargos.v1.SignalService.StreamSignals:output_type -> jevargos.v1.ReportResponse
-	6, // [6:8] is the sub-list for method output_type
-	4, // [4:6] is the sub-list for method input_type
-	4, // [4:4] is the sub-list for extension type_name
-	4, // [4:4] is the sub-list for extension extendee
-	0, // [0:4] is the sub-list for field type_name
+	2, // 0: jevargos.v1.SecuritySignal.user_context:type_name -> jevargos.v1.UserContext
+	3, // 1: jevargos.v1.SecuritySignal.request_context:type_name -> jevargos.v1.RequestContext
+	4, // 2: jevargos.v1.SecuritySignal.response_context:type_name -> jevargos.v1.ResponseContext
+	9, // 3: jevargos.v1.RequestContext.metadata_masked:type_name -> jevargos.v1.RequestContext.MetadataMaskedEntry
+	0, // 4: jevargos.v1.BlocklistEvent.kind:type_name -> jevargos.v1.BlocklistEvent.Kind
+	7, // 5: jevargos.v1.BlocklistEvent.entries:type_name -> jevargos.v1.BlockEntry
+	1, // 6: jevargos.v1.SignalService.ReportSignal:input_type -> jevargos.v1.SecuritySignal
+	1, // 7: jevargos.v1.SignalService.StreamSignals:input_type -> jevargos.v1.SecuritySignal
+	6, // 8: jevargos.v1.ControlService.WatchBlocklist:input_type -> jevargos.v1.WatchBlocklistRequest
+	5, // 9: jevargos.v1.SignalService.ReportSignal:output_type -> jevargos.v1.ReportResponse
+	5, // 10: jevargos.v1.SignalService.StreamSignals:output_type -> jevargos.v1.ReportResponse
+	8, // 11: jevargos.v1.ControlService.WatchBlocklist:output_type -> jevargos.v1.BlocklistEvent
+	9, // [9:12] is the sub-list for method output_type
+	6, // [6:9] is the sub-list for method input_type
+	6, // [6:6] is the sub-list for extension type_name
+	6, // [6:6] is the sub-list for extension extendee
+	0, // [0:6] is the sub-list for field type_name
 }
 
 func init() { file_signal_proto_init() }
@@ -472,13 +716,14 @@ func file_signal_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_signal_proto_rawDesc), len(file_signal_proto_rawDesc)),
-			NumEnums:      0,
-			NumMessages:   6,
+			NumEnums:      1,
+			NumMessages:   9,
 			NumExtensions: 0,
-			NumServices:   1,
+			NumServices:   2,
 		},
 		GoTypes:           file_signal_proto_goTypes,
 		DependencyIndexes: file_signal_proto_depIdxs,
+		EnumInfos:         file_signal_proto_enumTypes,
 		MessageInfos:      file_signal_proto_msgTypes,
 	}.Build()
 	File_signal_proto = out.File

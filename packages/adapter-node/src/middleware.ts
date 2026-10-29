@@ -1,8 +1,12 @@
 // フレームワーク向けの組み込みヘルパー (Express のミドルウェア、Next.js の Route Handler ラッパー)。
 // フレームワーク自体には依存しない (必要な部分だけを構造的な型で受け取る)。
 
+import type { BlockChecker } from "./blocklist.js";
 import { reportHttp, type HttpSignalOptions } from "./http.js";
 import type { Reporter } from "./reporter.js";
+import { normalizeIp } from "./signal.js";
+
+const BLOCKED_BODY = JSON.stringify({ error: "forbidden" });
 
 /** Express (および互換フレームワーク) のリクエストのうち、使う部分だけの型。 */
 export interface ExpressLikeRequest {
@@ -18,6 +22,21 @@ export interface ExpressLikeRequest {
 export interface ExpressLikeResponse {
   statusCode: number;
   on(event: "finish", listener: () => void): unknown;
+  setHeader(name: string, value: string): unknown;
+  end(chunk: string): unknown;
+}
+
+export interface ExpressMiddlewareOptions extends HttpSignalOptions {
+  /**
+   * 遮断リスト (通常は BlocklistWatcher)。指定すると、遮断中の IP からのリクエストを 403 で拒否する
+   * (Level 4 の自動遮断と、管理者が承認した遮断)。
+   */
+  blocklist?: BlockChecker | undefined;
+  /**
+   * [差し替えポイント] 遮断したリクエストへの応答。既定は 403 と {"error":"forbidden"}。
+   * 独自のエラーページやエラー形式を返す場合に指定する。
+   */
+  onBlocked?: ((req: ExpressLikeRequest, res: ExpressLikeResponse) => void) | undefined;
 }
 
 /**
@@ -27,9 +46,10 @@ export interface ExpressLikeResponse {
  *
  * クライアント IP には `req.ip` を使う。ロードバランサーの背後では Express の `trust proxy` を設定すること。
  */
-export function createExpressMiddleware(reporter: Reporter, opts: HttpSignalOptions) {
+export function createExpressMiddleware(reporter: Reporter, opts: ExpressMiddlewareOptions) {
   return (req: ExpressLikeRequest, res: ExpressLikeResponse, next: () => void): void => {
     const start = performance.now();
+    const blocked = opts.blocklist?.isBlocked(normalizeIp(req.ip)) ?? false;
     res.on("finish", () => {
       const pattern = req.route?.path;
       reportHttp(
@@ -46,6 +66,17 @@ export function createExpressMiddleware(reporter: Reporter, opts: HttpSignalOpti
         opts,
       );
     });
+    if (blocked) {
+      // 遮断中の送信元: ルートの処理に進ませない (このリクエストもシグナルとして送る)
+      if (opts.onBlocked) {
+        opts.onBlocked(req, res);
+      } else {
+        res.statusCode = 403;
+        res.setHeader("Content-Type", "application/json");
+        res.end(BLOCKED_BODY);
+      }
+      return;
+    }
     next();
   };
 }
@@ -59,6 +90,10 @@ export interface RouteHandlerOptions extends HttpSignalOptions {
    * Vercel やリバースプロキシなど、ヘッダーを上書きする信頼できる基盤の背後でのみ既定のまま使うこと。
    */
   getClientIp?: ((req: Request) => string) | undefined;
+  /** 遮断リスト (通常は BlocklistWatcher)。指定すると、遮断中の IP からのリクエストを 403 で拒否する。 */
+  blocklist?: BlockChecker | undefined;
+  /** [差し替えポイント] 遮断したリクエストへの応答。既定は 403 と {"error":"forbidden"}。 */
+  onBlocked?: ((req: Request) => Response) | undefined;
 }
 
 function defaultClientIp(req: Request): string {
@@ -79,18 +114,25 @@ export function withJevArgos<A extends unknown[]>(
   const getClientIp = opts.getClientIp ?? defaultClientIp;
   return async (req, ...rest) => {
     const start = performance.now();
+    let clientIp = "";
+    try {
+      clientIp = getClientIp(req);
+    } catch {
+      // IP が取れなくても処理と送信は続ける
+    }
     let statusCode = 500;
     try {
+      if (opts.blocklist?.isBlocked(normalizeIp(clientIp))) {
+        const res =
+          opts.onBlocked?.(req) ??
+          new Response(BLOCKED_BODY, { status: 403, headers: { "Content-Type": "application/json" } });
+        statusCode = res.status;
+        return res;
+      }
       const res = await handler(req, ...rest);
       statusCode = res.status;
       return res;
     } finally {
-      let clientIp = "";
-      try {
-        clientIp = getClientIp(req);
-      } catch {
-        // IP が取れなくても送信は続ける
-      }
       reportHttp(
         reporter,
         {
