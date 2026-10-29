@@ -2,6 +2,16 @@
   "name": "@jev-argos/adapter-node",
   "version": "0.1.0",
   "description": "jev-argos adapter for Node.js BFFs: gRPC interceptors that report security signals to the jev-argos control server",
+  "keywords": [
+    "jev-argos",
+    "security",
+    "grpc",
+    "interceptor",
+    "bff",
+    "express",
+    "fastify",
+    "nextjs"
+  ],
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -16,14 +26,19 @@
     "!dist/test",
     "proto"
   ],
+  "sideEffects": false,
   "engines": {
     "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "scripts": {
     "build": "node scripts/copy-proto.mjs && tsc -b",
     "typecheck": "tsc -b --noEmit",
     "test": "node scripts/copy-proto.mjs && tsc -b && node --test \"dist/test/**/*.test.js\"",
-    "clean": "rm -rf dist proto *.tsbuildinfo"
+    "clean": "rm -rf dist proto *.tsbuildinfo",
+    "prepublishOnly": "node scripts/copy-proto.mjs && tsc -b && node --test \"dist/test/**/*.test.js\""
   },
   "dependencies": {
     "@grpc/grpc-js": "^1.12.2",

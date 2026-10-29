@@ -15,8 +15,7 @@ x-admin-token: &admin-token ${JEV_ARGOS_ADMIN_TOKEN:?JEV_ARGOS_ADMIN_TOKEN ã‚’è¨
 services:
   core:
     build: .
-    image: jev-argos/core:local
-    command: ["-addr", ":50051", "-api-addr", ":8080"]
+    image: jev-argos/server:local
     environment:
       JEV_ARGOS_REDIS_URL: redis://redis:6379/0
       JEV_ARGOS_POSTGRES_URL: postgres://jevargos:jevargos@postgres:5432/jevargos?sslmode=disable
@@ -31,6 +30,11 @@ services:
         condition: service_healthy
       postgres:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/jev-argos-server", "-healthcheck"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
     restart: unless-stopped
 
   redis:
@@ -68,7 +72,8 @@ services:
     ports:
       - "127.0.0.1:3000:8080"
     depends_on:
-      - core
+      core:
+        condition: service_healthy
 
 volumes:
   pgdata:

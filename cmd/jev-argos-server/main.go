@@ -3,11 +3,16 @@
 //	jev-argos-server [flags]         gRPC サーバー (シグナル受信) と管理 HTTP API を起動する
 //	jev-argos-server -demo [flags]   疑似シグナルを送って判定パイプラインの動作を確認する。
 //	                                 管理 API が有効なら、デモ後もダッシュボード確認用に起動し続ける
+//	jev-argos-server -healthcheck    起動中のサーバーの gRPC / HTTP ヘルスチェックを行い、終了コードで結果を返す
+//	                                 (シェルの無いコンテナイメージの HEALTHCHECK 用)
+//
+// 設定はフラグまたは環境変数で行う (詳細は README.md):
+//   - -addr (JEV_ARGOS_GRPC_ADDR): gRPC の待受アドレス。
 //
 // 設計書 7.2 に従い、指定が無ければ外部依存なし (Zero Config) で動く:
 //   - -redis-url (JEV_ARGOS_REDIS_URL): Redis バッファを使い、複数インスタンスで統計を共有する。未指定ならインメモリ。
 //   - -postgres-url (JEV_ARGOS_POSTGRES_URL): Level 2〜4 の判定ログを PostgreSQL に保存する。未指定なら保存しない。
-//   - -api-addr: 管理 HTTP API (承認待ちアクション) の待受アドレス。空なら無効。
+//   - -api-addr (JEV_ARGOS_API_ADDR): 管理 HTTP API (承認待ちアクション) の待受アドレス。空なら無効。
 //   - -admin-token (JEV_ARGOS_ADMIN_TOKEN): 管理 API の Bearer トークン。未指定なら起動ごとに生成してログに出す。
 //   - -demo (JEV_ARGOS_DEMO=true): 起動時に疑似シグナルを流す。
 package main
@@ -28,6 +33,8 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/health"
+	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	jevargosv1 "github.com/jev-argos/jev-argos/gen/v1"
@@ -51,21 +58,40 @@ type config struct {
 	demo        bool
 }
 
+// envOr は環境変数 key が設定されていればその値 (空文字を含む)、無ければ def を返す。
+func envOr(key, def string) string {
+	if v, ok := os.LookupEnv(key); ok {
+		return v
+	}
+	return def
+}
+
 func main() {
 	var cfg config
-	flag.StringVar(&cfg.addr, "addr", ":50051", "gRPC listen address")
-	flag.StringVar(&cfg.apiAddr, "api-addr", "127.0.0.1:8080", "admin HTTP API listen address; disabled if empty")
+	var healthcheck bool
+	flag.StringVar(&cfg.addr, "addr", envOr("JEV_ARGOS_GRPC_ADDR", ":50051"), "gRPC listen address (or JEV_ARGOS_GRPC_ADDR)")
+	flag.StringVar(&cfg.apiAddr, "api-addr", envOr("JEV_ARGOS_API_ADDR", "127.0.0.1:8080"), "admin HTTP API listen address; disabled if empty (or JEV_ARGOS_API_ADDR)")
+	flag.BoolVar(&healthcheck, "healthcheck", false, "check the health of a running server and exit (0: healthy, 1: unhealthy)")
 	flag.StringVar(&cfg.adminToken, "admin-token", os.Getenv("JEV_ARGOS_ADMIN_TOKEN"), "bearer token for the admin API; generated at startup if empty")
 	flag.BoolVar(&cfg.demo, "demo", os.Getenv("JEV_ARGOS_DEMO") == "true", "run a demo with synthetic signals (or JEV_ARGOS_DEMO=true)")
 	flag.StringVar(&cfg.redisURL, "redis-url", os.Getenv("JEV_ARGOS_REDIS_URL"), "Redis URL for the shared buffer (e.g. redis://localhost:6379/0); in-memory if empty")
 	flag.StringVar(&cfg.postgresURL, "postgres-url", os.Getenv("JEV_ARGOS_POSTGRES_URL"), "PostgreSQL URL for decision logs (e.g. postgres://user@localhost:5432/jevargos); not persisted if empty")
 	flag.Parse()
 
+	if healthcheck {
+		if err := checkHealth(cfg); err != nil {
+			fmt.Fprintln(os.Stderr, "unhealthy:", err)
+			os.Exit(1)
+		}
+		fmt.Println("healthy")
+		return
+	}
+
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	slog.SetDefault(logger)
 
-	// デモは既定で空きポートのローカルのみで受け付ける。-addr を明示すればそのアドレスで待ち受ける (コンテナ用)
-	addrSet := false
+	// デモは既定で空きポートのローカルのみで受け付ける。アドレスを明示すればそのアドレスで待ち受ける (コンテナ用)
+	_, addrSet := os.LookupEnv("JEV_ARGOS_GRPC_ADDR")
 	flag.Visit(func(f *flag.Flag) { addrSet = addrSet || f.Name == "addr" })
 	if cfg.demo && !addrSet {
 		cfg.addr = "127.0.0.1:0"
@@ -96,6 +122,10 @@ func run(cfg config, logger *slog.Logger) error {
 	srv := receiver.NewServer(buf, classifier.NewDefault(), emitter, receiver.Options{Logger: logger})
 	gs := grpc.NewServer()
 	jevargosv1.RegisterSignalServiceServer(gs, srv)
+	// 標準の gRPC Health Checking Protocol (Kubernetes の grpc プローブ・grpc_health_probe 用)
+	hs := health.NewServer()
+	healthpb.RegisterHealthServer(gs, hs)
+	hs.SetServingStatus(jevargosv1.SignalService_ServiceDesc.ServiceName, healthpb.HealthCheckResponse_SERVING)
 
 	lis, err := net.Listen("tcp", cfg.addr)
 	if err != nil {
@@ -127,6 +157,7 @@ func run(cfg config, logger *slog.Logger) error {
 		}
 	}
 
+	hs.Shutdown() // 停止中は NOT_SERVING を返し、新しいトラフィックを受けないようにする
 	stopAPI()
 	gs.GracefulStop()
 	srv.Close()
@@ -134,6 +165,64 @@ func run(cfg config, logger *slog.Logger) error {
 		logger.Warn("events dropped before reaching emitter", "count", n)
 	}
 	return err
+}
+
+// localAddr は待受アドレスを、同じホストから接続するためのアドレスに変換する (":8080" → "127.0.0.1:8080")。
+func localAddr(addr string) (string, error) {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return "", err
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		host = "127.0.0.1"
+	}
+	return net.JoinHostPort(host, port), nil
+}
+
+// checkHealth は同じ設定で起動中のサーバーの gRPC ヘルスと (有効なら) 管理 API の /api/healthz を確認する。
+func checkHealth(cfg config) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	grpcAddr, err := localAddr(cfg.addr)
+	if err != nil {
+		return fmt.Errorf("grpc addr: %w", err)
+	}
+	conn, err := grpc.NewClient(grpcAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	resp, err := healthpb.NewHealthClient(conn).Check(ctx, &healthpb.HealthCheckRequest{
+		Service: jevargosv1.SignalService_ServiceDesc.ServiceName,
+	})
+	if err != nil {
+		return fmt.Errorf("grpc %s: %w", grpcAddr, err)
+	}
+	if resp.GetStatus() != healthpb.HealthCheckResponse_SERVING {
+		return fmt.Errorf("grpc %s: %s", grpcAddr, resp.GetStatus())
+	}
+
+	if cfg.apiAddr == "" {
+		return nil
+	}
+	apiAddr, err := localAddr(cfg.apiAddr)
+	if err != nil {
+		return fmt.Errorf("api addr: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+apiAddr+"/api/healthz", nil)
+	if err != nil {
+		return err
+	}
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("api %s: %w", apiAddr, err)
+	}
+	res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		return fmt.Errorf("api %s: HTTP %d", apiAddr, res.StatusCode)
+	}
+	return nil
 }
 
 // startAPI は管理 HTTP API を起動し、停止用の関数を返す。
