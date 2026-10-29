@@ -33,7 +33,6 @@ import (
 	jevargosv1 "github.com/jev-argos/jev-argos/gen/v1"
 	"github.com/jev-argos/jev-argos/pkg/action"
 	"github.com/jev-argos/jev-argos/pkg/api"
-	"github.com/jev-argos/jev-argos/pkg/approval"
 	"github.com/jev-argos/jev-argos/pkg/classifier"
 	"github.com/jev-argos/jev-argos/pkg/receiver"
 )
@@ -83,7 +82,10 @@ func run(cfg config, logger *slog.Logger) error {
 		return err
 	}
 	blocklist := newBlocklist(ctx, rdb, logger)
-	actions := approval.NewMemoryStore()
+	actions, err := newApprovalStore(ctx, pool, logger)
+	if err != nil {
+		return err
+	}
 	emitters, err := newEmitters(ctx, cfg, pool, actions, blocklist, logger)
 	if err != nil {
 		return err

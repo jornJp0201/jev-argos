@@ -93,6 +93,23 @@ func newBlocklist(ctx context.Context, rdb *redis.Client, logger *slog.Logger) a
 	return action.NewRedisBlocklist(ctx, rdb, "", logger)
 }
 
+// newApprovalStore は PostgreSQL があれば PostgreSQL (再起動後も残り、インスタンス間で共有)、
+// 無ければメモリの承認キューを返す。
+func newApprovalStore(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger) (approval.Store, error) {
+	if pool == nil {
+		logger.Warn("approval queue is in memory; it is lost on restart (set JEV_ARGOS_POSTGRES_URL to persist)")
+		return approval.NewMemoryStore(), nil
+	}
+	s := approval.NewPostgresStore(pool, logger)
+	migrateCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	if err := s.Migrate(migrateCtx); err != nil {
+		return nil, err
+	}
+	s.Start(ctx)
+	return s, nil
+}
+
 // newExecutor は承認されたアクションの実行方法を組み立てる。
 //
 // [差し替えポイント] アクションの種類ごとの実行方法。既定では block_ip を遮断リストに登録し、
