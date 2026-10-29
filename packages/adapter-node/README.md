@@ -378,3 +378,7 @@ Jev は gRPC のステータスコードで判定するため、HTTP ステー�
 pnpm build   # proto/ をコピーして tsc でビルド
 pnpm test    # ビルドして node --test で実行 (npm run test でも可)
 ```
+
+## ライセンス
+
+MIT

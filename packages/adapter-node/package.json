@@ -12,6 +12,16 @@
     "fastify",
     "nextjs"
   ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jornJp0201/jev-argos.git",
+    "directory": "packages/adapter-node"
+  },
+  "homepage": "https://github.com/jornJp0201/jev-argos/tree/main/packages/adapter-node#readme",
+  "bugs": {
+    "url": "https://github.com/jornJp0201/jev-argos/issues"
+  },
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
