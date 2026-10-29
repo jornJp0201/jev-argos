@@ -1,4 +1,4 @@
-# @jev-argos/adapter-node
+# @jornjp/adapter-node
 
 **jev-argos の Node.js 用アダプター。** Express / Next.js / Fastify / gRPC などの Node.js BFF に組み込み、
 リクエストごとのメタデータを jev-argos のコントロールサーバーへ非同期に送る軽量ミドルウェア。
@@ -42,7 +42,7 @@ LLM と人間は本当に必要なものだけを見る。
        | HTTP
        v
   [ Main BFF (Node.js) ]                            [ jev-argos-server (Go) ]
-    + @jev-argos/adapter-node  --- gRPC signal --->   Signal Receiver        :50051
+    + @jornjp/adapter-node  --- gRPC signal --->   Signal Receiver        :50051
       ^^^^^^^^^^^^^^^^^^^^^^^      (async, after       |
       THIS PACKAGE                  the response)      v
        ^                                             Sliding Window stats    -- Redis (optional)
@@ -66,7 +66,7 @@ LLM と人間は本当に必要なものだけを見る。
 **必要なのは次の 2 つだけ**。
 
 1. **jev-argos-server** (Go): 裏でシグナルを受信・判定する制御エンジン。
-2. **@jev-argos/adapter-node** (このパッケージ): あなたの Node.js BFF に挟む数行のミドルウェア。
+2. **@jornjp/adapter-node** (このパッケージ): あなたの Node.js BFF に挟む数行のミドルウェア。
 
 ### ステップ 1: コアサーバーを起動する
 
@@ -85,17 +85,17 @@ gRPC のポート 50051 でシグナルを受け付ける。詳細は jev-argos 
 ### ステップ 2: インストールする
 
 ```bash
-pnpm add @jev-argos/adapter-node
+pnpm add @jornjp/adapter-node
 # または
-npm i @jev-argos/adapter-node
+npm i @jornjp/adapter-node
 ```
 
 > npm にはまだ公開していない。それまでは jev-argos のリポジトリでパッケージを作って入れる:
 >
 > ```bash
-> corepack enable && pnpm install && pnpm --filter @jev-argos/adapter-node build
-> (cd packages/adapter-node && npm pack)     # jev-argos-adapter-node-0.1.0.tgz ができる
-> pnpm add /path/to/jev-argos/packages/adapter-node/jev-argos-adapter-node-0.1.0.tgz   # あなたのアプリで
+> corepack enable && pnpm install && pnpm --filter @jornjp/adapter-node build
+> (cd packages/adapter-node && npm pack)     # jornjp-adapter-node-0.1.0.tgz ができる
+> pnpm add /path/to/jev-argos/packages/adapter-node/jornjp-adapter-node-0.1.0.tgz   # あなたのアプリで
 > ```
 
 ### ステップ 3: BFF に組み込む
@@ -104,7 +104,7 @@ npm i @jev-argos/adapter-node
 
 ```ts
 import express from "express";
-import { SignalReporter, createExpressMiddleware } from "@jev-argos/adapter-node";
+import { SignalReporter, createExpressMiddleware } from "@jornjp/adapter-node";
 
 const reporter = new SignalReporter({ target: "localhost:50051" }); // ステップ 1 のサーバー
 
@@ -123,7 +123,7 @@ Route Handler を `withJevArgos` で包む。
 
 ```ts
 // lib/jev-argos.ts
-import { SignalReporter } from "@jev-argos/adapter-node";
+import { SignalReporter } from "@jornjp/adapter-node";
 
 // 開発時のホットリロードで接続が増えないよう、プロセスで 1 つだけ作る
 const g = globalThis as { jevArgosReporter?: SignalReporter };
@@ -134,7 +134,7 @@ export const reporter = (g.jevArgosReporter ??= new SignalReporter({
 
 ```ts
 // app/api/users/[id]/route.ts
-import { withJevArgos } from "@jev-argos/adapter-node";
+import { withJevArgos } from "@jornjp/adapter-node";
 import { reporter } from "@/lib/jev-argos";
 
 export const runtime = "nodejs"; // gRPC は Edge Runtime では動かないため Node.js ランタイムを使う
@@ -171,7 +171,7 @@ docker logs jev-argos 2>&1 | grep "jev-argos action"
 
 ```ts
 import Fastify from "fastify";
-import { SignalReporter, reportHttp } from "@jev-argos/adapter-node";
+import { SignalReporter, reportHttp } from "@jornjp/adapter-node";
 
 const reporter = new SignalReporter({ target: "localhost:50051" });
 const app = Fastify(); // プロキシの背後なら trustProxy を設定する
@@ -198,7 +198,7 @@ gRPC では IP・User-Agent・ステータス・レイテンシをインター�
 
 ```ts
 import * as grpc from "@grpc/grpc-js";
-import { SignalReporter, createClientInterceptor, createServerInterceptor } from "@jev-argos/adapter-node";
+import { SignalReporter, createClientInterceptor, createServerInterceptor } from "@jornjp/adapter-node";
 
 const reporter = new SignalReporter({ target: "localhost:50051" });
 
@@ -225,7 +225,7 @@ const userClient = new UserServiceClient("user-service:50051", grpc.credentials.
 (Express / Next.js は 403、gRPC は `PERMISSION_DENIED`。アプリのハンドラーは呼ばれない)。
 
 ```ts
-import { BlocklistWatcher } from "@jev-argos/adapter-node";
+import { BlocklistWatcher } from "@jornjp/adapter-node";
 
 const blocklist = new BlocklistWatcher({ target: "localhost:50051" });
 
@@ -362,7 +362,7 @@ Jev は gRPC のステータスコードで判定するため、HTTP ステー�
 ## 動作要件
 
 - Node.js 20 以上
-- ES Modules (`import`) のみ対応。CommonJS からは `await import("@jev-argos/adapter-node")` で読み込む。
+- ES Modules (`import`) のみ対応。CommonJS からは `await import("@jornjp/adapter-node")` で読み込む。
 - Next.js では Node.js ランタイムで使う (gRPC は Edge Runtime では動かない)。
 - `@grpc/grpc-js` と `@grpc/proto-loader` は依存として一緒に入る。シグナルのスキーマ (`signal.proto`) はパッケージに同梱されている。
 

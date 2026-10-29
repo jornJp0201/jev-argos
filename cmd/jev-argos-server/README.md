@@ -42,7 +42,7 @@ S はリスクスコア (0.0〜4.0)、C は確信度 (0.0〜1.0)。S ≥ 3.5 で
        | HTTP
        v
   [ Main BFF (Node.js) ]                            [ jev-argos-server (Go) ]  <== THIS SERVER
-    + @jev-argos/adapter-node  --- gRPC signal --->   Signal Receiver        :50051
+    + @jornjp/adapter-node  --- gRPC signal --->   Signal Receiver        :50051
       (middleware / interceptor)   (async, after       |
        ^                            the response)      v
        |                                             Sliding Window stats    -- Redis (optional)
@@ -82,7 +82,7 @@ S はリスクスコア (0.0〜4.0)、C は確信度 (0.0〜1.0)。S ≥ 3.5 で
 **必要なのは次の 2 つだけ**。Redis・PostgreSQL・ダッシュボードは後から追加できる (なくても動く)。
 
 1. **jev-argos-server** (このサーバー): 裏でシグナルを受信・判定する制御エンジン。
-2. **@jev-argos/adapter-node** (TypeScript): あなたの Node.js BFF に挟む数行のミドルウェア。
+2. **@jornjp/adapter-node** (TypeScript): あなたの Node.js BFF に挟む数行のミドルウェア。
 
 ### ステップ 1: このサーバーを起動する
 
@@ -98,11 +98,11 @@ go run main.go
 ### ステップ 2-3: BFF にアダプターを組み込む
 
 ```bash
-pnpm add @jev-argos/adapter-node   # npm 未公開の間の入れ方は packages/adapter-node/README.md を参照
+pnpm add @jornjp/adapter-node   # npm 未公開の間の入れ方は packages/adapter-node/README.md を参照
 ```
 
 ```ts
-import { SignalReporter, createExpressMiddleware } from "@jev-argos/adapter-node";
+import { SignalReporter, createExpressMiddleware } from "@jornjp/adapter-node";
 
 const reporter = new SignalReporter({ target: "localhost:50051" }); // ステップ 1 のサーバー
 app.use(createExpressMiddleware(reporter, { sourceService: "main-bff" })); // Express の場合

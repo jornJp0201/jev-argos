@@ -1,5 +1,5 @@
 {
-  "name": "@jev-argos/adapter-node",
+  "name": "@jornjp/adapter-node",
   "version": "0.1.0",
   "description": "jev-argos adapter for Node.js BFFs: gRPC interceptors that report security signals to the jev-argos control server",
   "keywords": [
