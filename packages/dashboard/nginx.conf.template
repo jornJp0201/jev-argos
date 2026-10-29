@@ -1,0 +1,22 @@
+# JEV_ARGOS_API_URL / JEV_ARGOS_ADMIN_TOKEN は起動時に展開される。
+# 管理 API のトークンはこのプロキシだけが持ち、ブラウザには渡さない。
+# このポートに到達できる人は誰でも承認操作ができるため、公開する場合は前段で管理者を認証すること。
+server {
+    listen 8080;
+    root /usr/share/nginx/html;
+
+    location / {
+        try_files $uri /index.html;
+    }
+
+    location /api/ {
+        proxy_pass ${JEV_ARGOS_API_URL};
+        proxy_set_header Authorization "Bearer ${JEV_ARGOS_ADMIN_TOKEN}";
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        # SSE (/api/actions/stream) を即時に流す
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 1h;
+    }
+}

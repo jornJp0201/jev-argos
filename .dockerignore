@@ -1,0 +1,8 @@
+**/node_modules
+**/dist
+**/*.tsbuildinfo
+packages/adapter-node/proto
+.git
+.DS_Store
+*.md
+!packages/**/README.md

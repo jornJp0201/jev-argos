@@ -1,0 +1,58 @@
+syntax = "proto3";
+
+package jevargos.v1;
+
+option go_package = "github.com/jev-argos/jev-argos/gen/v1;jevargosv1";
+
+// 監視シグナル収集サービス
+service SignalService {
+  // 単一シグナルの送信 (Fire-and-Forget用)
+  rpc ReportSignal (SecuritySignal) returns (ReportResponse);
+  
+  // 大量ログ・バッチ用のストリーミング送信 (将来の拡張用)
+  rpc StreamSignals (stream SecuritySignal) returns (ReportResponse);
+}
+
+// メインのシグナル構造体
+message SecuritySignal {
+  string signal_id = 1;        // UUID
+  string timestamp = 2;        // ISO8601 フォーマット
+  string source_service = 3;   // 例: "main-bff", "payment-backend"
+
+  UserContext user_context = 4;
+  RequestContext request_context = 5;
+  ResponseContext response_context = 6;
+  
+  string trace_id = 7;         // フロントエンド・他サービスとの追跡用キー
+}
+
+// ユーザー・クライアント情報
+message UserContext {
+  string user_id = 1;          // メタデータから抽出した識別子
+  string user_role = 2;        // 例: "admin", "user", "guest"
+  string client_ip = 3;        // IPアドレス
+  string user_agent = 4;       // User-Agent 文字列
+  string session_hash = 5;     // セッション/トークンの難読化ハッシュ
+}
+
+// リクエスト詳細
+message RequestContext {
+  string protocol = 1;         // "grpc" または "http"
+  string method = 2;           // 例: "/user.UserService/GetUser"
+  map<string, string> metadata_masked = 3; // 重要なヘッダー (マスク済み)
+  string payload_summary = 4;  // パラメータ概要 (個人情報マスク済み)
+}
+
+// レスポンス詳細・エラー情報
+message ResponseContext {
+  int32 status_code = 1;       // gRPC Status Code (0: OK, 7: PERMISSION_DENIED 等)
+  string error_code = 2;       // アプリケーション固有エラーコード
+  string error_message = 3;    // PIIマスク済みエラーメッセージ
+  int64 latency_ms = 4;        // 処理時間 (ミリ秒)
+}
+
+// レスポンス
+message ReportResponse {
+  bool accepted = 1;
+  int32 immediate_action_level = 2; // レベル4等の即時ブロック通知用
+}

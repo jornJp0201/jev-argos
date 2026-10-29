@@ -1,0 +1,74 @@
+# jev-argos ローカル検証環境: コアサーバー + Redis + PostgreSQL + ダッシュボード
+#
+#   export JEV_ARGOS_ADMIN_TOKEN=$(openssl rand -hex 16)
+#   docker compose up --build
+#
+#   ダッシュボード     http://localhost:3000
+#   gRPC (シグナル受信) localhost:50051
+#   管理 API          http://localhost:8080 (Authorization: Bearer $JEV_ARGOS_ADMIN_TOKEN)
+#   PostgreSQL        localhost:55432 (jevargos / jevargos)
+#
+# 公開ポートはすべて 127.0.0.1 に限定している (ローカル検証用)。
+
+x-admin-token: &admin-token ${JEV_ARGOS_ADMIN_TOKEN:?JEV_ARGOS_ADMIN_TOKEN を設定してください (README 参照)}
+
+services:
+  core:
+    build: .
+    image: jev-argos/core:local
+    command: ["-addr", ":50051", "-api-addr", ":8080"]
+    environment:
+      JEV_ARGOS_REDIS_URL: redis://redis:6379/0
+      JEV_ARGOS_POSTGRES_URL: postgres://jevargos:jevargos@postgres:5432/jevargos?sslmode=disable
+      JEV_ARGOS_ADMIN_TOKEN: *admin-token
+      # 起動時に疑似シグナルを流し、ダッシュボードに承認待ちアラートを発生させる (不要なら false)
+      JEV_ARGOS_DEMO: ${JEV_ARGOS_DEMO:-true}
+    ports:
+      - "127.0.0.1:50051:50051"
+      - "127.0.0.1:8080:8080"
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  redis:
+    image: redis:7.4-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: jevargos
+      POSTGRES_PASSWORD: jevargos # ローカル検証専用
+      POSTGRES_DB: jevargos
+    ports:
+      - "127.0.0.1:${JEV_ARGOS_POSTGRES_PORT:-55432}:5432" # ホストの 5432 との衝突を避ける
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U jevargos -d jevargos"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: packages/dashboard/Dockerfile
+    image: jev-argos/dashboard:local
+    environment:
+      JEV_ARGOS_API_URL: http://core:8080
+      JEV_ARGOS_ADMIN_TOKEN: *admin-token
+    ports:
+      - "127.0.0.1:3000:8080"
+    depends_on:
+      - core
+
+volumes:
+  pgdata:
