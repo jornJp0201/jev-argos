@@ -18,6 +18,8 @@ function bind(server: grpc.Server): Promise<number> {
 export interface Collector {
   target: string;
   signals: SecuritySignal[];
+  /** StreamSignals で受け取ったバッチごとの件数。 */
+  batches: number[];
   /** n 件以上受信するまで待つ。 */
   waitFor(n: number, timeoutMs?: number): Promise<SecuritySignal[]>;
   close(): void;
@@ -31,16 +33,31 @@ export async function startCollector(
   const pkg = grpc.loadPackageDefinition(def) as any;
   const signals: SecuritySignal[] = [];
   const server = new grpc.Server();
+  const batches: number[] = [];
   server.addService(pkg.jevargos.v1.SignalService.service, {
     ReportSignal: (call: grpc.ServerUnaryCall<SecuritySignal, ReportResponse>, cb: grpc.sendUnaryData<ReportResponse>) => {
       signals.push(call.request);
       cb(null, respond(call.request));
+    },
+    StreamSignals: (call: grpc.ServerReadableStream<SecuritySignal, ReportResponse>, cb: grpc.sendUnaryData<ReportResponse>) => {
+      let n = 0;
+      let level = 0;
+      call.on("data", (s: SecuritySignal) => {
+        n++;
+        signals.push(s);
+        level = Math.max(level, respond(s).immediate_action_level);
+      });
+      call.on("end", () => {
+        batches.push(n);
+        cb(null, { accepted: true, immediate_action_level: level });
+      });
     },
   });
   const port = await bind(server);
   return {
     target: `127.0.0.1:${port}`,
     signals,
+    batches,
     async waitFor(n, timeoutMs = 2000) {
       const deadline = Date.now() + timeoutMs;
       while (signals.length < n) {

@@ -76,4 +76,41 @@ describe("SignalReporter", () => {
       collector.close();
     }
   });
+
+  it("batch mode sends via StreamSignals by size and by interval", async () => {
+    const collector = await startCollector((s) => ({
+      accepted: true,
+      immediate_action_level: s.request_context.method.startsWith("/admin") ? 4 : 1,
+    }));
+    const levels: number[] = [];
+    const reporter = new SignalReporter({
+      target: collector.target,
+      batch: { maxSize: 10, flushIntervalMs: 30 },
+      onResponse: (res) => levels.push(res.immediate_action_level),
+    });
+    try {
+      for (let i = 0; i < 25; i++) reporter.report(signal(i === 24 ? "/admin.A/Op" : "/a.A/Get"));
+      await collector.waitFor(25);
+      await reporter.close();
+      // バッチは並行して送られるため、完了の順序は決まらない
+      const sorted = (xs: number[]) => [...xs].sort((a, b) => a - b);
+      assert.deepEqual(sorted(collector.batches), [5, 10, 10], "two full batches, then the rest after the interval");
+      assert.deepEqual(sorted(levels), [1, 1, 4], "level is per batch (max)");
+      assert.deepEqual(reporter.stats, { sent: 25, failed: 0, dropped: 0, inFlight: 0 });
+    } finally {
+      collector.close();
+    }
+  });
+
+  it("batch mode flushes pending signals on close", async () => {
+    const collector = await startCollector();
+    const reporter = new SignalReporter({ target: collector.target, batch: { maxSize: 100, flushIntervalMs: 60_000 } });
+    try {
+      for (let i = 0; i < 3; i++) reporter.report(signal());
+      await reporter.close();
+      assert.deepEqual(collector.batches, [3]);
+    } finally {
+      collector.close();
+    }
+  });
 });

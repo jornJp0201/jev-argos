@@ -29,6 +29,13 @@ export interface ReporterOptions {
   onError?: (err: Error, signal: SecuritySignal) => void;
   /** サーバーの応答を受け取ったときに呼ばれる (例: immediate_action_level が 4 なら遮断処理)。 */
   onResponse?: (res: ReportResponse, signal: SecuritySignal) => void;
+  /**
+   * バッチ送信 (設計書 4 章 Phase 2)。指定すると、maxSize 件たまるか flushIntervalMs が経過するたびに
+   * StreamSignals でまとめて送る。送信回数が減るため高トラフィック時に向く。
+   * onResponse はバッチ単位になり (immediate_action_level はバッチ内の最大値、signal はバッチの最後の 1 件)、
+   * 遮断には BlocklistWatcher を使うこと。
+   */
+  batch?: { maxSize?: number; flushIntervalMs?: number };
 }
 
 export interface ReporterStats {
@@ -44,8 +51,14 @@ type ReportSignalFn = (
   callback: (err: grpc.ServiceError | null, res?: ReportResponse) => void,
 ) => grpc.ClientUnaryCall;
 
+type StreamSignalsFn = (
+  options: grpc.CallOptions,
+  callback: (err: grpc.ServiceError | null, res?: ReportResponse) => void,
+) => grpc.ClientWritableStream<SecuritySignal>;
+
 interface SignalServiceClient extends grpc.Client {
   ReportSignal: ReportSignalFn;
+  StreamSignals: StreamSignalsFn;
 }
 
 type SignalServiceCtor = new (target: string, creds: grpc.ChannelCredentials) => SignalServiceClient;
@@ -76,6 +89,9 @@ export class SignalReporter implements Reporter {
   private inFlight = 0;
   private closed = false;
   private idleWaiters: Array<() => void> = [];
+  private readonly batch: { maxSize: number; flushIntervalMs: number } | undefined;
+  private pending: SecuritySignal[] = [];
+  private flushTimer: ReturnType<typeof setTimeout> | undefined;
 
   constructor(opts: ReporterOptions) {
     const Service = loadSignalService(opts.protoPath ?? DEFAULT_PROTO_PATH);
@@ -84,12 +100,25 @@ export class SignalReporter implements Reporter {
     this.maxInFlight = opts.maxInFlight ?? 1000;
     this.onError = opts.onError;
     this.onResponse = opts.onResponse;
+    if (opts.batch) {
+      this.batch = { maxSize: opts.batch.maxSize ?? 50, flushIntervalMs: opts.batch.flushIntervalMs ?? 100 };
+    }
   }
 
   /** シグナルを非同期に送信する。すぐに戻り、例外は投げない。 */
   report(signal: SecuritySignal): void {
-    if (this.closed || this.inFlight >= this.maxInFlight) {
+    if (this.closed || this.inFlight + this.pending.length >= this.maxInFlight) {
       this.counters.dropped++;
+      return;
+    }
+    if (this.batch) {
+      this.pending.push(signal);
+      if (this.pending.length >= this.batch.maxSize) {
+        setImmediate(() => this.flush());
+      } else if (!this.flushTimer) {
+        this.flushTimer = setTimeout(() => this.flush(), this.batch.flushIntervalMs);
+        this.flushTimer.unref?.();
+      }
       return;
     }
     this.inFlight++;
@@ -103,6 +132,7 @@ export class SignalReporter implements Reporter {
   /** 新しい送信の受付を止め、送信中のシグナルを待ってから接続を閉じる。 */
   async close(): Promise<void> {
     this.closed = true;
+    this.flush(); // バッチ送信の待ちを送り切る
     if (this.inFlight > 0) {
       await new Promise<void>((resolve) => this.idleWaiters.push(resolve));
     }
@@ -129,8 +159,37 @@ export class SignalReporter implements Reporter {
     }
   }
 
-  private done(): void {
-    this.inFlight--;
+  /** たまっているシグナルを StreamSignals でまとめて送る (バッチ送信)。 */
+  private flush(): void {
+    clearTimeout(this.flushTimer);
+    this.flushTimer = undefined;
+    const batch = this.pending.splice(0, this.batch?.maxSize ?? this.pending.length);
+    if (batch.length === 0) return;
+    if (this.pending.length > 0) setImmediate(() => this.flush());
+    this.inFlight += batch.length;
+    const last = batch[batch.length - 1]!;
+    const finish = (err: Error | null, res?: ReportResponse) => {
+      if (err) {
+        this.counters.failed += batch.length;
+        this.safely(() => this.onError?.(err, last));
+      } else {
+        this.counters.sent += batch.length;
+        if (res) this.safely(() => this.onResponse?.(res, last));
+      }
+      this.done(batch.length);
+    };
+    try {
+      const deadline = Date.now() + this.timeoutMs * Math.max(1, Math.ceil(batch.length / 10));
+      const stream = this.client.StreamSignals({ deadline }, (err, res) => finish(err, res));
+      for (const s of batch) stream.write(s);
+      stream.end();
+    } catch (err) {
+      finish(err as Error);
+    }
+  }
+
+  private done(n = 1): void {
+    this.inFlight -= n;
     if (this.inFlight === 0) {
       for (const resolve of this.idleWaiters.splice(0)) resolve();
     }
