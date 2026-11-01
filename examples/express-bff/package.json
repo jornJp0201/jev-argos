@@ -1,0 +1,15 @@
+{
+  "name": "@jev-argos/example-express-bff",
+  "version": "0.0.0",
+  "private": true,
+  "description": "テスト・デモ用の BFF (本番用ではない): @jornjp/adapter-node を組み込んだ Express アプリの例",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "@jornjp/adapter-node": "workspace:*",
+    "express": "^5.1.0"
+  },
+  "license": "MIT"
+}

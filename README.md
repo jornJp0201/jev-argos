@@ -147,6 +147,7 @@ msg="jev-argos action" level=3 downgraded=true score=3.6 confidence=0.625 client
 | Slack に通知する | `JEV_ARGOS_SLACK_WEBHOOK_URL` を指定 |
 | 承認待ちを確認・承認する | 管理 API、または [Web ダッシュボード](#付属-web-ダッシュボード) |
 | 自社の環境に合わせる | [差し替えポイント](#差し替えポイント) |
+| 組み込んだアプリで攻撃から遮断までを試す | [テスト用 BFF (examples/express-bff)](examples/express-bff/README.md) |
 
 設定の一覧は [判定サーバーの README](cmd/jev-argos-server/README.md#設定) にあります。
 
@@ -220,6 +221,7 @@ Web ダッシュボードの差し替えポイントは [付属: Web ダッシ�
 | `pkg/client` | Go | Go の BFF 用アダプター | 上記「Go の BFF」 |
 | `cmd/jev-argos-server` + `pkg/` | Go | 判定サーバー (受信・採点・遮断・承認キュー・LLM 分析・通知・管理 API) | [README](cmd/jev-argos-server/README.md) |
 | `packages/dashboard` | TypeScript / React | 付属の Web ダッシュボード (任意) | [README](packages/dashboard/README.md) |
+| `examples/express-bff` | JavaScript | **テスト・デモ用の BFF** (本番用ではない)。`@jornjp/adapter-node` を Express に組み込んだ例 | [README](examples/express-bff/README.md) |
 
 ```
 .
@@ -242,6 +244,7 @@ Web ダッシュボードの差し替えポイントは [付属: Web ダッシ�
 ├── proto/signal.proto      アダプターとサーバーの通信の定義
 ├── gen/v1/                 proto から生成した Go コード
 ├── packages/dashboard/     付属の Web ダッシュボード (任意)
+├── examples/express-bff/  テスト・デモ用の BFF (本番用ではない)
 ├── docs/jev_argos_spec.md  設計書
 ├── Dockerfile              判定サーバーのイメージ
 └── docker-compose.yml      一式を起動するローカル検証環境
@@ -321,3 +324,4 @@ docker compose up --build
 - Slack 通知は `JEV_ARGOS_SLACK_WEBHOOK_URL`、承認された対処の実行先は `JEV_ARGOS_ACTION_WEBHOOK_URL` を指定して起動する。
 - 公開ポートはすべて `127.0.0.1` に限定している。ダッシュボードに到達できる人は承認操作ができるため、外部に公開する場合は前段で管理者を認証すること。
 - 停止は `docker compose down` (データも消す場合は `docker compose down -v`)。
+- 起動した判定サーバーに、アダプターを組み込んだアプリから実際にリクエストを送るには [テスト用 BFF](examples/express-bff/README.md) を使う (`node examples/express-bff/server.js`)。
