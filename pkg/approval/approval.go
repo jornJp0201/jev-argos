@@ -433,13 +433,11 @@ func EvidenceFromEvent(e receiver.Event) Evidence {
 }
 
 func reason(e receiver.Event) string {
-	// 数値は Evidence に入っているため、ここでは判断の理由だけを述べる
+	// 具体的な数値 (S, C と閾値) は Evidence に入っているため、ここでは判断の理由だけを述べる
 	if e.Decision.Downgraded {
-		return fmt.Sprintf("リスクスコアは遮断域 (S ≥ %.1f) ですが、確信度が %.1f 未満のため自動遮断を保留しました。",
-			guardrail.BlockScoreThreshold, guardrail.BlockConfidenceThreshold)
+		return "リスクスコアは遮断域ですが、確信度が自動遮断の閾値に届かないため、自動遮断を保留しました。"
 	}
-	return fmt.Sprintf("リスクスコアが Level 3 の範囲 (%.1f ≤ S < %.1f) のため、遮断の要否について人間の確認が必要です。",
-		guardrail.Level3ScoreThreshold, guardrail.BlockScoreThreshold)
+	return "リスクスコアが Level 3 の範囲のため、遮断の要否について人間の確認が必要です。"
 }
 
 // Executor は承認されたアクションを実行する。

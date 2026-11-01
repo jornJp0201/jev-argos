@@ -197,7 +197,7 @@ grep -rn "差し替えポイント" cmd pkg packages/*/src packages/dashboard/*.
 | 何を変えるか | 場所 | 既定 |
 | --- | --- | --- |
 | **Jev モデル** (学習済みモデルへの置き換え) | `pkg/classifier` の `Model` | ルールベースの暫定モデル `HeuristicModel` |
-| **Level 2/3 の境界値** | `pkg/guardrail` | S ≥ 1.5 / 2.5 (暫定値) |
+| **レベルを分ける閾値** (遮断スコア・確信度・L3・L2) | `pkg/guardrail` の `Guardrail` (ライブラリ)、または付属サーバーの環境変数 `JEV_ARGOS_BLOCK_SCORE` / `_BLOCK_CONFIDENCE` / `_LEVEL3_SCORE` / `_LEVEL2_SCORE` | S ≥ 3.5 かつ C ≥ 0.8 で遮断、L3 2.5 / L2 1.5 (いずれも暫定の初期値) |
 | **LLM** (OpenAI・社内ゲートウェイ等) | `pkg/llm` の `Provider`、`cmd/jev-argos-server/components.go` の `newLLMProvider` | Ollama `qwen2.5:3b` (Claude も同梱) |
 | **LLM に送る情報の伏せ方** | `pkg/llm` の `Masker` | 外部の LLM のときだけ IP・ユーザー ID を仮名化 |
 | **分析の観点 (プロンプト)** | `pkg/llm` の `DefaultSystemPrompt` / `Analyzer.SystemPrompt` | 汎用のセキュリティ分析 |

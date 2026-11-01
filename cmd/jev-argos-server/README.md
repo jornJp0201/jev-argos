@@ -161,6 +161,17 @@ go run ./cmd/jev-argos-server
 | `JEV_ARGOS_INGEST_TOKEN` | (無効) | HTTP でのシグナル受信 (`POST /api/signals`) の送信専用トークン。管理用とは別にする |
 | `JEV_ARGOS_DEMO` | `false` | `true` で起動時に疑似シグナルを流す |
 
+**判定の閾値** (Jev のスコア S と確信度 C から Level を決める境界。いずれも実測ではなく安全側の初期値で、運用で調整する)
+
+| 環境変数 | 既定 | 内容 |
+| --- | --- | --- |
+| `JEV_ARGOS_BLOCK_SCORE` | `3.5` | この S 以上かつ確信度条件を満たすと Level 4 (自動遮断) |
+| `JEV_ARGOS_BLOCK_CONFIDENCE` | `0.8` | 自動遮断に必要な確信度 C。未満なら S が遮断域でも Level 3 に格下げ (誤遮断の防止) |
+| `JEV_ARGOS_LEVEL3_SCORE` | `2.5` | この S 以上で Level 3 (承認キュー) |
+| `JEV_ARGOS_LEVEL2_SCORE` | `1.5` | この S 以上で Level 2 (LLM 分析) |
+
+ライブラリとして使う場合は `guardrail.New(...)` で作って `receiver.Options.Guardrail` に渡す (環境変数と同じ既定値)。
+
 **保存先** (指定しなければメモリ上。再起動で消え、複数インスタンスで共有されない)
 
 | 環境変数 | 内容 |

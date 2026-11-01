@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strconv"
 	"time"
 )
 
@@ -41,6 +42,26 @@ type config struct {
 
 	// HTTP でのシグナル受信 (pkg/receiver)
 	ingestToken string
+
+	// レベルを分ける閾値 (pkg/guardrail)。0 以下なら既定値。
+	blockScore      float64
+	blockConfidence float64
+	level3Score     float64
+	level2Score     float64
+}
+
+// envFloat は環境変数 key を float64 として読む。未設定・空なら def、不正な値ならエラーで終了する。
+func envFloat(key string, def float64) float64 {
+	v, ok := os.LookupEnv(key)
+	if !ok || v == "" {
+		return def
+	}
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "invalid %s=%q (number): %v\n", key, v, err)
+		os.Exit(2)
+	}
+	return f
 }
 
 // envOr は環境変数 key が設定されていればその値 (空文字を含む)、無ければ def を返す。
@@ -88,6 +109,10 @@ func parseConfig() (cfg config, healthcheck bool) {
 	flag.StringVar(&cfg.alertWebhookSecret, "alert-webhook-secret", os.Getenv("JEV_ARGOS_ALERT_WEBHOOK_SECRET"), "HMAC secret for alert webhooks")
 	flag.StringVar(&cfg.dashboardURL, "dashboard-url", os.Getenv("JEV_ARGOS_DASHBOARD_URL"), "dashboard URL included in alerts")
 	flag.StringVar(&cfg.ingestToken, "ingest-token", os.Getenv("JEV_ARGOS_INGEST_TOKEN"), "bearer token for HTTP signal ingestion (POST /api/signals); disabled if empty")
+	flag.Float64Var(&cfg.blockScore, "block-score", envFloat("JEV_ARGOS_BLOCK_SCORE", 0), "score S to reach Level 4 auto-block (default 3.5)")
+	flag.Float64Var(&cfg.blockConfidence, "block-confidence", envFloat("JEV_ARGOS_BLOCK_CONFIDENCE", 0), "confidence C required to auto-block; below this, S in the block range is downgraded to Level 3 (default 0.8)")
+	flag.Float64Var(&cfg.level3Score, "level3-score", envFloat("JEV_ARGOS_LEVEL3_SCORE", 0), "score S to reach Level 3 (default 2.5)")
+	flag.Float64Var(&cfg.level2Score, "level2-score", envFloat("JEV_ARGOS_LEVEL2_SCORE", 0), "score S to reach Level 2 (default 1.5)")
 	flag.Parse()
 
 	// デモは既定で空きポートのローカルのみで受け付ける。アドレスを明示すればそのアドレスで待ち受ける (コンテナ用)

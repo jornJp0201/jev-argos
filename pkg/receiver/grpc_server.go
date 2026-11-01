@@ -59,6 +59,9 @@ type Options struct {
 	// Observer は Level 1 を含むすべての判定で同期的に呼ばれる (例: ダッシュボードへの配信)。
 	// 判定の応答を遅らせないよう、すぐに戻ること。
 	Observer func(Event)
+	// Guardrail はレベルを分ける閾値。nil なら既定値 (guardrail.Default())。
+	// [差し替えポイント] 判定を厳しく / 緩くしたい場合は guardrail.New(...) を渡す。
+	Guardrail *guardrail.Guardrail
 }
 
 // Server は SignalService の実装。
@@ -67,6 +70,7 @@ type Server struct {
 
 	buf      buffer.Buffer
 	cls      *classifier.Classifier
+	guard    guardrail.Guardrail
 	emitter  Emitter
 	observer func(Event)
 	logger   *slog.Logger
@@ -92,9 +96,14 @@ func NewServer(buf buffer.Buffer, cls *classifier.Classifier, emitter Emitter, o
 	if opts.Logger == nil {
 		opts.Logger = slog.Default()
 	}
+	guard := guardrail.Default()
+	if opts.Guardrail != nil {
+		guard = guardrail.New(*opts.Guardrail)
+	}
 	s := &Server{
 		buf:      buf,
 		cls:      cls,
+		guard:    guard,
 		emitter:  emitter,
 		observer: opts.Observer,
 		logger:   opts.Logger,
@@ -163,7 +172,7 @@ func (s *Server) Evaluate(ctx context.Context, signal *jevargosv1.SecuritySignal
 		Signal:     signal,
 		Features:   features,
 		Assessment: assessment,
-		Decision:   guardrail.Decide(assessment),
+		Decision:   s.guard.Decide(assessment),
 	}
 	if s.observer != nil {
 		s.observer(e)

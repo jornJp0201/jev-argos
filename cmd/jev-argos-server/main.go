@@ -37,6 +37,7 @@ import (
 	"github.com/jornJp0201/jev-argos/pkg/approval"
 	"github.com/jornJp0201/jev-argos/pkg/classifier"
 	"github.com/jornJp0201/jev-argos/pkg/events"
+	"github.com/jornJp0201/jev-argos/pkg/guardrail"
 	"github.com/jornJp0201/jev-argos/pkg/llm"
 	"github.com/jornJp0201/jev-argos/pkg/receiver"
 )
@@ -124,7 +125,13 @@ func run(cfg config, logger *slog.Logger) error {
 	emitters := newEmitters(cfg, stores, actions, blocklist, llmEmitter, logger)
 
 	// --- gRPC: シグナル受信・遮断リスト配信・ヘルスチェック ---
-	srv := receiver.NewServer(buf, classifier.NewDefault(), emitters, receiver.Options{Logger: logger, Observer: hub.PublishDecision})
+	guard := guardrail.New(guardrail.Guardrail{
+		BlockScore:      cfg.blockScore,
+		BlockConfidence: cfg.blockConfidence,
+		Level3Score:     cfg.level3Score,
+		Level2Score:     cfg.level2Score,
+	})
+	srv := receiver.NewServer(buf, classifier.NewDefault(), emitters, receiver.Options{Logger: logger, Observer: hub.PublishDecision, Guardrail: &guard})
 	gs := grpc.NewServer()
 	jevargosv1.RegisterSignalServiceServer(gs, srv)
 	jevargosv1.RegisterControlServiceServer(gs, &action.ControlServer{Blocklist: blocklist})
