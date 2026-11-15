@@ -1,4 +1,4 @@
-# examples/express-bff (テスト用 BFF)
+# examples/test-bff (テスト用 BFF)
 
 > **これはテスト・デモ用の BFF です。本番では使わないでください。**
 > 認証・データはすべてダミーで、`x-user-id` ヘッダーで誰にでもなりすませます。
@@ -11,7 +11,7 @@
   curl (正常なユーザー / 攻撃者)
         |  HTTP :4000
         v
-  [ examples/express-bff ]  --- シグナル (gRPC) --->  [ jev-argos-server :50051 ]  ---> ダッシュボード :3000
+  [ examples/test-bff ]  --- シグナル (gRPC) --->  [ jev-argos-server :50051 ]  ---> ダッシュボード :3000
     + @jornjp/adapter-node  <--- 遮断リストの配信 ---
 ```
 
@@ -25,12 +25,12 @@
 
 ## 起動
 
-リポジトリのルートで実行します。jev-argos-server が先に起動している必要があります (README の「付属: Web ダッシュボード」の Docker Compose で起動できます)。
+リポジトリのルートで実行します。jev-argos-server が先に起動している必要があります ([ルートの README の「5 分で試す」](../../README.md#5-分で試す) の Docker Compose で起動できます)。
 
 ```bash
 corepack pnpm install
 corepack pnpm --filter @jornjp/adapter-node build
-node examples/express-bff/server.js        # http://localhost:4000
+node examples/test-bff/server.js        # http://localhost:4000
 ```
 
 | 環境変数 | 既定 | 内容 |

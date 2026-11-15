@@ -47,6 +47,13 @@ pnpm --filter dashboard dev
 
 本番ではダッシュボードの前段 (リバースプロキシ等) で管理者を認証し、トークンを付与すること。
 
+## 差し替えポイント
+
+| 何を変えるか | 場所 | 既定 |
+| --- | --- | --- |
+| データの取得元 | `src/types.ts` の `DataSource`、`src/App.tsx` | 判定サーバーの SSE |
+| 管理者の認証 | `nginx.conf.template` / `vite.config.ts` | 共有トークン (本番では前段に SSO を置く) |
+
 ## 開発
 
 ```sh

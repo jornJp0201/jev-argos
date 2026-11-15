@@ -3,7 +3,7 @@
 // 認証・データはすべてダミー (x-user-id ヘッダーでユーザーを名乗れる)。
 // jev-argos の組み込みに関係するのは「jev-argos の組み込み」の 3 か所だけで、それ以外は攻撃の的になる普通の API。
 //
-//   node examples/express-bff/server.js        (http://localhost:4000)
+//   node examples/test-bff/server.js        (http://localhost:4000)
 
 import express from "express";
 import { BlocklistWatcher, SignalReporter, createExpressMiddleware } from "@jornjp/adapter-node";

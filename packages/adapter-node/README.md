@@ -4,58 +4,17 @@
 リクエストごとのメタデータを jev-argos のコントロールサーバーへ非同期に送る軽量ミドルウェア。
 
 ```ts
-app.use(createExpressMiddleware(reporter, { sourceService: "main-bff" })); // Express ならこれだけ
+app.use(createExpressMiddleware(reporter, { sourceService: "main-bff" })); // Express の場合 (遮断も行うなら blocklist を渡す)
 ```
 
 ## jev-argos とは
 
-**BFF / バックエンド向けのセキュリティ・コントロールプレーン (制御基盤)。**
-1 次リスク判定エンジン「Jev」(ミリ秒単位の判定が目標)、LLM による深層分析、誤判定を防ぐ Human-in-the-Loop 承認機能を組み合わせ、
-アプリ本体の通信経路の外側から、攻撃の検知・遮断・人間による判断までを担う。
-
-### 解決する課題 (Why jev-argos?)
-
-| 従来の方法 | 問題 |
-| --- | --- |
-| **WAF / 固定ルール** | 閾値が固定。低速スキャンや分散した攻撃、未知のパターンを見逃す。閾値を下げると、正常なアクセスの急増を誤遮断する |
-| **LLM の直接利用** | 1 件の判定に秒単位の時間がかかり、リクエストの処理中には使えない。全リクエストに使うとトークンコストが大きくなる |
-
-jev-argos では、すべてのリクエストを Jev が送信元の直近の振る舞い (エラーの頻度・権限エラーの広がり・レイテンシの変化) と合わせて採点し、
-LLM と人間は本当に必要なものだけを見る。
-
-| Level | jev-argos の対応 |
-| --- | --- |
-| **1** 正常 / 軽微 | 記録のみ。大半の通信はここで終わり、LLM を呼ばない |
-| **2** 不審 | 判定ログを保存し、LLM で非同期に深層分析 |
-| **3** 攻撃の疑い | 承認キューに「IP の一時遮断」を提案し、Slack / Webhook に通知。管理者が承認すると遮断する |
-| **4** 危険 | その場で `Level 4` を返し、送信元 IP を自動遮断。`BlocklistWatcher` を使うと以降のリクエストを拒否できる |
-
-危険なスコアでも確信度が 0.8 未満なら自動遮断せず、Level 3 として人間の承認キューに回す (誤遮断の防止)。
-
-### アーキテクチャと、このパッケージの位置
-
-```
-  Your application                                  jev-argos
-  ================                                  =========
-
-  [ Frontend ]
-       | HTTP
-       v
-  [ Main BFF (Node.js) ]                            [ jev-argos-server (Go) ]
-    + @jornjp/adapter-node  --- gRPC signal --->   Signal Receiver        :50051
-      ^^^^^^^^^^^^^^^^^^^^^^^      (async, after       |
-      THIS PACKAGE                  the response)      v
-       ^                                             Sliding Window stats    -- Redis (optional)
-       +------------ Level 4 notification ---------  Jev scoring -> Guardrail (Level 1-4)
-                                                       |-- decision log      -- PostgreSQL (optional)
-                                                       +-- approval queue    -> Admin API :8080
-                                                                                    | HTTP / SSE
-                                                                                    v
-                                                                   [ Dashboard (React UI) ]
-```
+**Web サービスの BFF / バックエンドに組み込む、攻撃の検知と遮断のためのライブラリ。**
+送信元ごとの直近の振る舞いから攻撃を見つけ、危険と確信できる送信元は自動で遮断し、確信が持てないものは人間の承認を待つ。
+全体像・判定のルールは [jev-argos のリポジトリ](https://github.com/jornJp0201/jev-argos) を参照。
 
 **このパッケージの役割**は、BFF の中で動き、各リクエストの IP・User-Agent・メソッド・ステータス・処理時間を集めて
-コントロールサーバーへ gRPC で送ること。判定そのものはコントロールサーバーが行う。
+判定サーバー (jev-argos-server) へ gRPC で送ること。判定そのものは判定サーバーが行う。
 
 - **アプリを遅くしない**: 送信は応答の後に `setImmediate` で回す Fire-and-Forget。コントロールサーバーが停止・遅延していても、アプリの応答は影響を受けない。
 - **アプリを壊さない**: 送信の失敗・タイムアウト・過負荷時の破棄はすべて内部で吸収し、例外を投げない。
@@ -74,13 +33,16 @@ jev-argos のリポジトリのルートで:
 
 ```bash
 docker build -t jev-argos/server .
-docker run -d --name jev-argos -p 127.0.0.1:50051:50051 jev-argos/server
+docker run -d --name jev-argos \
+  -p 127.0.0.1:50051:50051 -p 127.0.0.1:8080:8080 \
+  -e JEV_ARGOS_ADMIN_TOKEN=$(openssl rand -hex 16) \
+  jev-argos/server
 
 # または Go 1.26 以上で直接起動
 go run ./cmd/jev-argos-server
 ```
 
-gRPC のポート 50051 でシグナルを受け付ける。詳細は jev-argos リポジトリの `cmd/jev-argos-server/README.md` を参照。
+50051 番 (gRPC) でシグナルを受け付け、8080 番で管理 API (承認・遮断の操作) を提供する。詳細は jev-argos リポジトリの `cmd/jev-argos-server/README.md` を参照。
 
 ### ステップ 2: インストールする
 
@@ -114,6 +76,7 @@ app.use(createExpressMiddleware(reporter, { sourceService: "main-bff" })); // �
 app.get("/users/:id", (req, res) => res.json({ id: req.params.id })); // 既存のルートはそのまま
 ```
 
+- 遮断も行う場合は `BlocklistWatcher` を作って `blocklist` に渡す ([遮断を有効にする](#遮断を有効にする-blocklistwatcher))。送るだけなら不要。
 - クライアント IP には `req.ip` を使う。ロードバランサーの背後では `app.set("trust proxy", ...)` を設定すること。
 - ルートは `/users/:id` のようなパターンで送る (URL 中の ID は送らない)。どのルートにも一致しなかったリクエストは `(unmatched)` になる。
 
@@ -158,7 +121,8 @@ export const GET = withJevArgos(
 存在しないページに 1 分間で 30 回アクセスすると、エラーの集中として検知される。
 
 ```bash
-for i in $(seq 30); do curl -s -o /dev/null http://localhost:3000/no-such-page-$i; done
+# localhost:4000 はあなたのアプリのアドレスに置き換える
+for i in $(seq 30); do curl -s -o /dev/null http://localhost:4000/no-such-page-$i; done
 docker logs jev-argos 2>&1 | grep "jev-argos action"
 # msg="jev-argos action" level=3 downgraded=true score=3.6 confidence=0.625 ... method="GET (unmatched)" ip_error_count_1m=30
 ```
@@ -258,7 +222,9 @@ process.on("SIGTERM", async () => {
 });
 ```
 
-## 実際の開発で決めること (差し替えポイント)
+## 差し替えポイント
+
+実際の開発で、自分の環境に合わせて決める項目。
 
 | 項目 | 指定する場所 | 既定 |
 | --- | --- | --- |

@@ -3,36 +3,47 @@
 **jev-argos のコントロールサーバー本体 (Go)。** BFF から届くシグナルの受信、Jev によるリスク判定、
 Redis / PostgreSQL との連携、人間の承認キューを担う制御エンジン。
 
+jev-argos の全体像と、Docker Compose で一式を試す手順は [ルートの README](../../README.md) を参照。
+
 ```bash
-docker build -t jev-argos/server . && docker run -d -p 127.0.0.1:50051:50051 jev-argos/server
+# リポジトリのルートで
+docker build -t jev-argos/server .
+docker run -d --name jev-argos \
+  -p 127.0.0.1:50051:50051 -p 127.0.0.1:8080:8080 \
+  -e JEV_ARGOS_ADMIN_TOKEN=$(openssl rand -hex 16) \
+  jev-argos/server
 ```
 
-## jev-argos とは
+## 判定のルール
 
-**BFF / バックエンド向けのセキュリティ・コントロールプレーン (制御基盤)。**
-1 次リスク判定エンジン「Jev」(ミリ秒単位の判定が目標)、LLM による深層分析、誤判定を防ぐ Human-in-the-Loop 承認機能を組み合わせ、
-アプリ本体の通信経路の外側から、攻撃の検知・遮断・人間による判断までを担う。
+判定エンジン **Jev** は、1 件のリクエストだけでなく**同じ送信元の直近の振る舞い**を合わせて採点する。
 
-### 解決する課題 (Why jev-argos?)
-
-| 従来の方法 | 問題 |
+| 見ているもの | 何が疑われるか |
 | --- | --- |
-| **WAF / 固定ルール** | 閾値が固定。低速スキャンや分散した攻撃、未知のパターンを見逃す。閾値を下げると、正常なアクセスの急増を誤遮断する |
-| **LLM の直接利用** | 1 件の判定に秒単位の時間がかかり、リクエストの処理中には使えない。全リクエストに使うとトークンコストが大きくなる |
+| 同じ IP の 1 分間のエラー数 | 総当たり・スキャン |
+| 5 分間に権限エラーを受けた API の種類数 | 権限の探索 (いろいろな管理 API を試している) |
+| その API の普段の処理時間に対する比 | 負荷をかける攻撃 |
 
-jev-argos では、すべてのリクエストを Jev が送信元の直近の振る舞いと合わせて採点し、
-LLM と人間は本当に必要なものだけを見る。
+「1 分間に 100 回エラーで遮断」のような固定の閾値では、低速な攻撃を見逃したり、正常なアクセスの急増を誤って遮断したりする。
+複数の兆候を組み合わせることで、両者を見分けやすくしている。
 
-| Level | 判定 | jev-argos の対応 |
+採点結果は **リスクスコア S** (0.0〜4.0) と **確信度 C** (0.0〜1.0) の 2 つで、次の 4 段階に分ける。
+
+| Level | 条件 | jev-argos の対応 |
 | --- | --- | --- |
-| **1** 正常 / 軽微 | S < 1.5 | 記録のみ。大半の通信はここで終わり、LLM を呼ばない |
-| **2** 不審 | 1.5 ≤ S < 2.5 | 判定ログを保存し、LLM で非同期に深層分析 |
-| **3** 攻撃の疑い | 2.5 ≤ S < 3.5 | 承認キューに「IP の一時遮断」を提案し、Slack / Webhook に通知。管理者がダッシュボードで承認すると遮断する |
-| **4** 危険 | S ≥ 3.5 かつ C ≥ 0.8 | その場で `immediate_action_level = 4` を返し、送信元 IP を自動遮断。遮断はアダプターに配信され、以降のリクエストを拒否する |
+| **1** 正常 | S < 1.5 | 何もしない。大半の通信はここで終わり、LLM を呼ばない |
+| **2** 不審 | 1.5 ≤ S < 2.5 | 判定ログを保存し、LLM で非同期に分析する |
+| **3** 攻撃の疑い | 2.5 ≤ S < 3.5、**または** S ≥ 3.5 で C < 0.8 (格下げ) | 承認キューに「IP の一時遮断」を提案し、Slack / Webhook に通知する。管理者が承認すると遮断する |
+| **4** 危険 | S ≥ 3.5 **かつ** C ≥ 0.8 | その場で `immediate_action_level = 4` を返し、送信元 IP を自動遮断して通知する。遮断はアダプターに配信され、以降のリクエストを拒否する |
 
-S はリスクスコア (0.0〜4.0)、C は確信度 (0.0〜1.0)。S ≥ 3.5 でも C < 0.8 なら自動遮断せず、Level 3 として承認キューに回す (誤遮断の防止)。
+- **確信度による格下げ**: S が遮断域でも C が足りなければ自動遮断せず、Level 3 として人間の判断に回す (誤遮断の防止)。
+- **LLM と人間の承認**: LLM が提案した対処や、取り消せない操作 (アカウント削除など) も、管理者が承認するまで実行されない。
+- **閾値**: 表の数値は実測ではなく安全側の初期値。[判定の閾値](#設定) の環境変数で変更できる。
 
-### アーキテクチャと、このサーバーの位置
+**なぜ LLM だけで判定しないのか** — LLM は 1 件の判定に秒単位かかることが多く、全リクエストに使うとコストも大きくなる。
+そこで Jev がすべてのリクエストを軽い計算で採点し (ミリ秒単位が目標。性能は未検証)、LLM は怪しいものだけを分析する。
+
+## アーキテクチャと、このサーバーの位置
 
 ```
   Your application                                  jev-argos
@@ -77,50 +88,7 @@ S はリスクスコア (0.0〜4.0)、C は確信度 (0.0〜1.0)。S ≥ 3.5 で
 | 50051 | gRPC (平文) | シグナル受信、遮断リストの配信、gRPC ヘルスチェック |
 | 8080 | HTTP | 管理 API、HTTP でのシグナル受信、`/api/healthz` |
 
-## 最小導入ステップ (Quick Start)
-
-**必要なのは次の 2 つだけ**。Redis・PostgreSQL・ダッシュボードは後から追加できる (なくても動く)。
-
-1. **jev-argos-server** (このサーバー): 裏でシグナルを受信・判定する制御エンジン。
-2. **@jornjp/adapter-node** (TypeScript): あなたの Node.js BFF に挟む数行のミドルウェア。
-
-### ステップ 1: このサーバーを起動する
-
-```bash
-# リポジトリのルートでイメージをビルドして起動 
-docker build -t jev-argos/server .
-docker run -d --name jev-argos -p 127.0.0.1:50051:50051 jev-argos/server
-
-# または Go 1.26 以上で直接起動 (このディレクトリで)
-go run main.go
-```
-
-### ステップ 2-3: BFF にアダプターを組み込む
-
-```bash
-pnpm add @jornjp/adapter-node   # npm 未公開の間の入れ方は packages/adapter-node/README.md を参照
-```
-
-```ts
-import { SignalReporter, createExpressMiddleware } from "@jornjp/adapter-node";
-
-const reporter = new SignalReporter({ target: "localhost:50051" }); // ステップ 1 のサーバー
-app.use(createExpressMiddleware(reporter, { sourceService: "main-bff" })); // Express の場合
-```
-
-Next.js・Fastify・gRPC への組み込み方は `packages/adapter-node/README.md` を参照。
-
-### ステップ 4: 動作を確認する
-
-存在しないページに 1 分間で 30 回アクセスすると、エラーの集中として検知される (Level 2 以上はログに出る)。
-
-```bash
-for i in $(seq 30); do curl -s -o /dev/null http://localhost:3000/no-such-page-$i; done
-docker logs jev-argos 2>&1 | grep "jev-argos action"
-# msg="jev-argos action" level=3 downgraded=true score=3.6 confidence=0.625 ... method="GET (unmatched)" ip_error_count_1m=30
-```
-
-エラーの集中という 1 種類の兆候だけでは確信度が 0.8 に届かないため、自動遮断ではなく Level 3 (承認キュー) に回る。
+BFF へのアダプターの組み込み方は [Node.js 版](../../packages/adapter-node/README.md) / [Go 版](../../pkg/client/README.md) を参照。
 
 ## 起動のバリエーション
 
@@ -128,7 +96,7 @@ Go 1.26 以上が必要。外部依存なし (インメモリ) で起動でき�
 
 ```sh
 # このディレクトリで
-go run main.go
+go run .
 
 # リポジトリのルートから
 go run ./cmd/jev-argos-server
@@ -235,7 +203,7 @@ JEV_ARGOS_LLM_PROVIDER=anthropic ANTHROPIC_API_KEY=sk-ant-... go run ./cmd/jev-a
 ```
 
 Claude を使う場合は、要求が安全性の分類器に断られたときに別のモデルが引き継ぐサーバー側のフォールバックを有効にしている。
-他の LLM を使う場合は `pkg/llm` の `Provider` を実装する ([差し替えポイント](../../README.md#差し替えポイント))。
+他の LLM を使う場合は `pkg/llm` の `Provider` を実装する ([差し替えポイント](#差し替えポイント))。
 
 ## Webhook
 
@@ -317,7 +285,7 @@ docker run --rm \
 docker inspect --format '{{.State.Health.Status}}' <container>   # healthy
 ```
 
-Redis・PostgreSQL・ダッシュボードを含む一式は、ルートの `docker-compose.yml` で起動できる ([ルートの README](../../README.md#docker-compose-で一式を起動する))。
+Redis・PostgreSQL・ダッシュボードを含む一式は、ルートの `docker-compose.yml` で起動できる ([ルートの README](../../README.md#5-分で試す))。
 
 ## Kubernetes
 
@@ -396,6 +364,27 @@ spec:
 - **承認キュー** (`JEV_ARGOS_POSTGRES_URL`): 承認待ちがレプリカ間で共有され、変更は LISTEN/NOTIFY で全レプリカの SSE に届く。
   同じ対象への承認待ちは DB の制約で 1 件に保たれる。
 - **LLM 分析の間引き**はレプリカごとに行うため、レプリカ数だけ分析の回数が増えうる。
+
+## 差し替えポイント
+
+自社の環境に合わせて差し替えられる箇所。コードの該当箇所には `[差し替えポイント]` のコメントを付けている。
+
+| 何を変えるか | 場所 | 既定 |
+| --- | --- | --- |
+| **Jev モデル** (学習済みモデルへの置き換え) | `pkg/classifier` の `Model` | ルールベースの暫定モデル `HeuristicModel` |
+| **レベルを分ける閾値** | `pkg/guardrail` の `Guardrail` (ライブラリ)、または[判定の閾値](#設定)の環境変数 | S ≥ 3.5 かつ C ≥ 0.8 で遮断、L3 2.5 / L2 1.5 |
+| **LLM** (OpenAI・社内ゲートウェイ等) | `pkg/llm` の `Provider`、`components.go` の `newLLMProvider` | Ollama `qwen2.5:3b` (Claude も同梱) |
+| **LLM に送る情報の伏せ方** | `pkg/llm` の `Masker` | 外部の LLM のときだけ IP・ユーザー ID を仮名化 |
+| **分析の観点 (プロンプト)** | `pkg/llm` の `DefaultSystemPrompt` / `Analyzer.SystemPrompt` | 汎用のセキュリティ分析 |
+| **LLM 分析の頻度・並列数** | `pkg/llm` の `Emitter` (`Cooldown` / `Workers`) | 同じ IP は 5 分に 1 回、並列 2 |
+| **分析結果の配信先** (チケット起票・SIEM 等) | `pkg/llm` の `Sink` | 判定ログ・承認キュー・ダッシュボード |
+| **通知先** (PagerDuty・Teams 等) | `pkg/notify` の `Notifier`、`components.go` の `newNotifiers` | Slack / 汎用 Webhook |
+| **通知の文面** | `pkg/notify` の `SlackText` | 日本語の要約 |
+| **承認された対処の実行方法** | `pkg/action` の `Router` / `WebhookExecutor`、`components.go` の `newExecutor` | IP 遮断 → 遮断リスト、それ以外 → アプリの Webhook |
+| **アプリ固有の対処** | `pkg/approval` の `ActionType` | 7 種類 (IP 遮断・セッション無効化・縮小運転・アカウント停止 / 削除・データ削除・サービス停止) |
+| **判定後の処理の追加・削除** | `components.go` の `newEmitters` | ログ・自動遮断・承認キュー・判定ログ・通知・LLM |
+| **統計の保存先** | `pkg/buffer` の `Buffer` | メモリ / Redis |
+| **LLM 用 DB ユーザーの権限** | `pkg/db` の Safe View の定義 (SQL コメント) | — (本番で設定する) |
 
 ## セキュリティ上の注意
 
