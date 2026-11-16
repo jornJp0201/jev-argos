@@ -22,9 +22,10 @@
 1. [しくみ](#しくみ)
 2. [5 分で試す](#5-分で試す)
 3. [自分のアプリに組み込む](#自分のアプリに組み込む)
-4. [ドキュメント一覧](#ドキュメント一覧)
-5. [実装状況と既知の制約](#実装状況と既知の制約)
-6. [開発](#開発)
+4. [他の言語で使う](#他の言語で使う)
+5. [ドキュメント一覧](#ドキュメント一覧)
+6. [実装状況と既知の制約](#実装状況と既知の制約)
+7. [開発](#開発)
 
 ---
 
@@ -173,12 +174,38 @@ msg="jev-argos action" level=3 downgraded=true score=3.6 confidence=0.625 client
 
 ---
 
+## 他の言語で使う
+
+公式のアダプターは Node.js と Go だけですが、アダプターと判定サーバーのやり取りは gRPC ([proto/signal.proto](proto/signal.proto)) で決まっています。
+**gRPC に対応している言語 (Java / Kotlin・C#・Python・Ruby・Rust など) なら、アダプターを書けば検知と遮断の両方が使えます。**
+規模の目安は、gRPC だけなら 300〜450 行、HTTP のミドルウェアも入れると 400〜600 行です。
+
+| 使う RPC | 用途 |
+| --- | --- |
+| `SignalService.ReportSignal` (バッチなら `StreamSignals`) | リクエストの情報を送る |
+| `ControlService.WatchBlocklist` (サーバー側のストリーミング) | 遮断中の送信元の一覧を受け取る |
+
+アダプターが守るべきことのうち、特に重要なのは次の 4 つです。
+
+- **送信はアプリを待たせない**: 非同期で送り、あふれたら捨て、例外をアプリに投げない
+- **`status_code` は gRPC のコード**: HTTP の 403 は 7 (`PERMISSION_DENIED`) に変換する。権限の探索の検知に使うため
+- **`method` は API ごとに同じ文字列**: HTTP なら実際の URL ではなく `GET /users/:id` のようなルートのパターン。どのルートにも合わなければ `GET (unmatched)`
+- **遮断の判定は手元のコピーで行う**: 遮断リストのストリームが切れたら自動で再接続し、その間は最後に受け取った一覧で判定を続ける
+
+詳細 (フィールドごとの値・ステータスの変換表・再接続の決まり・動作確認のチェックリスト) は [docs/adapter_spec.md](docs/adapter_spec.md) にあります。
+
+> 遮断リストを購読するため、プロセスが常駐している必要があります。PHP-FPM のようにリクエストごとにプロセスが終わる環境では、常駐の実行環境かサイドカーが必要です。
+> 検知だけなら、gRPC を使わずに HTTP の `POST /api/signals` でも送れます ([判定サーバーの README](cmd/jev-argos-server/README.md#api))。
+
+---
+
 ## ドキュメント一覧
 
 | 知りたいこと | 読むもの |
 | --- | --- |
 | Node.js の BFF への組み込み (Express / Next.js / Fastify / gRPC)・オプション | [packages/adapter-node/README.md](packages/adapter-node/README.md) |
 | Go の BFF への組み込み (net/http / gRPC) | [pkg/client/README.md](pkg/client/README.md) |
+| 他の言語でアダプターを書く | [docs/adapter_spec.md](docs/adapter_spec.md) |
 | 判定のルール・設定の一覧・LLM・Webhook・API・Docker・Kubernetes | [cmd/jev-argos-server/README.md](cmd/jev-argos-server/README.md) |
 | ダッシュボードの機能・単体での起動 | [packages/dashboard/README.md](packages/dashboard/README.md) |
 | テスト用 BFF で攻撃を試す | [examples/test-bff/README.md](examples/test-bff/README.md) |
@@ -244,7 +271,9 @@ grep -rn "差し替えポイント" cmd pkg packages/*/src packages/dashboard/*.
 │   ├── adapter-node/       Node.js 用アダプター (@jornjp/adapter-node)
 │   └── dashboard/          付属の Web ダッシュボード (任意)
 ├── examples/test-bff/      テスト用の BFF (本番用ではない)
-├── docs/jev_argos_spec.md  設計書
+├── docs/
+│   ├── jev_argos_spec.md   設計書
+│   └── adapter_spec.md     アダプター仕様 (他の言語で実装する人向け)
 ├── Dockerfile              判定サーバーのイメージ
 └── docker-compose.yml      一式を起動するローカル検証環境
 ```
