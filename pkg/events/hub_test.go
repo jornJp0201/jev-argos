@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -34,8 +35,9 @@ func event(id string, level guardrail.Level) receiver.Event {
 
 func TestHub_BacklogAndDecisionShape(t *testing.T) {
 	h := NewHub(3, nil)
+	// 購読者がいない間に届いた判定は、接続されたときに JSON にして送る
 	for _, id := range []string{"s1", "s2", "s3", "s4"} {
-		h.PublishDecision(event(id, guardrail.Level1))
+		h.PublishDecision(event(id, guardrail.Level2))
 	}
 	h.PublishAnalysis(event("s4", guardrail.Level2), approval.Analysis{Status: "done"}) // 分析も backlog に残す
 	backlog, _, cancel := h.Subscribe()
@@ -54,7 +56,7 @@ func TestHub_BacklogAndDecisionShape(t *testing.T) {
 		Features map[string]float64 `json:"features"`
 	}
 	json.Unmarshal(backlog[0].Data, &d)
-	if backlog[0].Name != "decision" || d.Signal.SignalID != "s3" || d.Level != 1 {
+	if backlog[0].Name != "decision" || d.Signal.SignalID != "s3" || d.Level != 2 {
 		t.Errorf("oldest kept = %+v", d)
 	}
 	// ダッシュボードが参照する 0 値のフィールドも省略しない
@@ -63,9 +65,82 @@ func TestHub_BacklogAndDecisionShape(t *testing.T) {
 	}
 }
 
+func TestHub_LiveDecision(t *testing.T) {
+	h := NewHub(10, nil)
+	_, updates, cancel := h.Subscribe()
+	defer cancel()
+	h.PublishDecision(event("live", guardrail.Level3))
+	m := <-updates
+	var d Decision
+	if err := json.Unmarshal(m.Data, &d); m.Name != "decision" || err != nil || d.Level != 3 {
+		t.Fatalf("live message = %q %s (%v)", m.Name, m.Data, err)
+	}
+	// 配信時に JSON にしたものを backlog でも使い回す
+	backlog, _, cancel2 := h.Subscribe()
+	defer cancel2()
+	if len(backlog) != 1 || string(backlog[0].Data) != string(m.Data) {
+		t.Errorf("backlog = %v, want the same message as the live one", backlog)
+	}
+}
+
+func TestHub_Level1IsSummarized(t *testing.T) {
+	h := NewHub(10, nil)
+	_, updates, cancel := h.Subscribe()
+	defer cancel()
+
+	for _, score := range []float64{0.1, 0.2, 0.3} {
+		e := event("l1", guardrail.Level1)
+		e.Assessment.Score = score
+		h.PublishDecision(e)
+	}
+	select {
+	case m := <-updates:
+		t.Fatalf("level 1 must not be sent one by one: %q %s", m.Name, m.Data)
+	default:
+	}
+
+	at := time.Date(2026, 11, 19, 10, 0, 1, 0, time.UTC)
+	h.flushSummary(at)
+	h.flushSummary(at.Add(time.Second)) // 0 件の区間は送らない
+	m := <-updates
+	var s Summary
+	if err := json.Unmarshal(m.Data, &s); m.Name != "summary" || err != nil {
+		t.Fatalf("message = %q %s (%v)", m.Name, m.Data, err)
+	}
+	if s.Count != 3 || math.Abs(s.ScoreSum-0.6) > 1e-9 || s.Timestamp != "2026-11-19T10:00:01Z" {
+		t.Errorf("summary = %+v", s)
+	}
+	select {
+	case m := <-updates:
+		t.Errorf("empty interval was sent: %s", m.Data)
+	default:
+	}
+
+	// 後から接続したダッシュボードにも、判定より先に直近の集計を送る
+	h.PublishDecision(event("l2", guardrail.Level2))
+	backlog, _, cancel2 := h.Subscribe()
+	defer cancel2()
+	if len(backlog) != 2 || backlog[0].Name != "summary" || backlog[1].Name != "decision" {
+		t.Errorf("backlog = %v, want summary then decision", backlog)
+	}
+}
+
+func TestRing(t *testing.T) {
+	r := newRing[int](3)
+	if got := r.items(); len(got) != 0 {
+		t.Fatalf("empty ring = %v", got)
+	}
+	for i := 1; i <= 5; i++ {
+		r.push(i)
+	}
+	if got := r.items(); len(got) != 3 || got[0] != 3 || got[1] != 4 || got[2] != 5 {
+		t.Errorf("items = %v, want [3 4 5]", got)
+	}
+}
+
 func TestHub_Stream(t *testing.T) {
 	h := NewHub(10, nil)
-	h.PublishDecision(event("old", guardrail.Level1))
+	h.PublishDecision(event("old", guardrail.Level2))
 	srv := httptest.NewServer(http.HandlerFunc(h.HandleStream))
 	defer srv.Close()
 

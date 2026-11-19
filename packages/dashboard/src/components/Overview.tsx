@@ -1,7 +1,7 @@
 import { Activity, Ban, Gauge, ShieldAlert } from "lucide-react";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { fmtNum } from "../lib/format";
-import type { DecisionEvent, Level } from "../types";
+import type { DecisionEvent, Level, Level1Summary } from "../types";
 import { LEVEL_STYLE } from "./LevelBadge";
 
 const WINDOW_MS = 5 * 60_000;
@@ -21,7 +21,7 @@ function Stat(props: { icon: ReactNode; label: string; value: string; sub: React
   );
 }
 
-export function Overview({ events }: { events: DecisionEvent[] }) {
+export function Overview({ events, summaries }: { events: DecisionEvent[]; summaries: Level1Summary[] }) {
   // 表示が停止中でも時間窓を進めるため 1 秒ごとに再計算する
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
@@ -50,8 +50,19 @@ export function Overview({ events }: { events: DecisionEvent[] }) {
       const bucket = TIMELINE_BUCKETS - 1 - Math.floor(age / 1_000);
       if (bucket >= 0) timeline[bucket]![e.level]++;
     }
+    // Level 1 は 1 秒ごとの件数で届く
+    for (const s of summaries) {
+      const age = Math.max(0, now - Date.parse(s.timestamp));
+      if (age > WINDOW_MS) break; // summaries も新しい順
+      total += s.count;
+      scoreSum += s.score_sum;
+      byLevel[1] += s.count;
+      if (age < 60_000) lastMinute += s.count;
+      const bucket = TIMELINE_BUCKETS - 1 - Math.floor(age / 1_000);
+      if (bucket >= 0) timeline[bucket]![1] += s.count;
+    }
     return { total, byLevel, avgScore: total ? scoreSum / total : 0, downgraded, blockedIps: blockedIps.size, rps: lastMinute / 60, timeline };
-  }, [events, now]);
+  }, [events, summaries, now]);
 
   const peak = Math.max(1, ...m.timeline.map((b) => b[1] + b[2] + b[3] + b[4]));
 

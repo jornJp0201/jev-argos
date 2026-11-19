@@ -58,6 +58,18 @@ export interface DecisionEvent {
 }
 
 /**
+ * Level 1 の判定の集計 (Go: events.Summary)。
+ * Level 1 は件数が多いため、サーバーは 1 件ずつではなく 1 秒ごとの件数として送る。
+ */
+export interface Level1Summary {
+  /** 区間の終わり (RFC 3339)。 */
+  timestamp: string;
+  count: number;
+  /** スコアの合計 (平均スコアの算出用)。 */
+  score_sum: number;
+}
+
+/**
  * ダッシュボードのデータ取得元。
  * [差し替えポイント] 既定は ApiDataSource (コントロールサーバーの /api/events/stream)。
  * 独自の配信基盤を使う場合はこのインターフェースを実装し、App.tsx の source を差し替える。
@@ -68,7 +80,10 @@ export interface DataSource {
   readonly isDemo: boolean;
   /** 新しいイベントと、LLM 解析結果の更新を購読する。戻り値で購読解除。 */
   subscribe(handlers: {
+    /** Level 2 以上の判定。 */
     onEvent: (e: DecisionEvent) => void;
+    /** Level 1 の判定の集計。 */
+    onSummary: (s: Level1Summary) => void;
     onLlmUpdate: (signalId: string, clientIp: string, llm: LlmAnalysis) => void;
     onStatus?: (status: "connecting" | "live" | "offline") => void;
   }): () => void;

@@ -1,5 +1,6 @@
 // デモ用データソース: 通常トラフィックに攻撃キャンペーンを混ぜた疑似シグナルを生成し、
 // サーバーと同じ集計 (Sliding Window) と判定ルールで評価する。
+// 配信もサーバーと同じく、Level 1 は 1 秒ごとの件数 (onSummary)、Level 2 以上は 1 件ずつ (onEvent) で送る。
 // LLM 解析は未接続のため、特徴量から組み立てたモック文面を返す。
 
 import { decide, evaluate } from "../lib/jev";
@@ -112,6 +113,8 @@ export class DemoDataSource implements DataSource {
     const timers = new Set<ReturnType<typeof setTimeout>>();
     let seq = 0;
     let nextCampaignAt = Date.now() + 3_000;
+    let level1Count = 0;
+    let level1ScoreSum = 0;
 
     const emit = (ip: string, ua: string, method: string, code: number, latency: number) => {
       const now = Date.now();
@@ -128,14 +131,17 @@ export class DemoDataSource implements DataSource {
       const features = windows.observe(signal, now);
       const { score, confidence } = evaluate(features);
       const event: DecisionEvent = { signal, features, score, confidence, ...decide(score, confidence) };
-      if (event.level >= 2) {
-        event.llm = { status: "pending" };
-        const t = setTimeout(() => {
-          timers.delete(t);
-          handlers.onLlmUpdate(signal.signal_id, ip, mockAnalysis(event));
-        }, 1_200 + rand(1_800));
-        timers.add(t);
+      if (event.level === 1) {
+        level1Count++;
+        level1ScoreSum += score;
+        return;
       }
+      event.llm = { status: "pending" };
+      const t = setTimeout(() => {
+        timers.delete(t);
+        handlers.onLlmUpdate(signal.signal_id, ip, mockAnalysis(event));
+      }, 1_200 + rand(1_800));
+      timers.add(t);
       handlers.onEvent(event);
     };
 
@@ -179,8 +185,15 @@ export class DemoDataSource implements DataSource {
 
     handlers.onStatus?.("live");
     const interval = setInterval(tick, TICK_MS);
+    const summaryInterval = setInterval(() => {
+      if (level1Count === 0) return;
+      handlers.onSummary({ timestamp: new Date().toISOString(), count: level1Count, score_sum: level1ScoreSum });
+      level1Count = 0;
+      level1ScoreSum = 0;
+    }, 1_000);
     return () => {
       clearInterval(interval);
+      clearInterval(summaryInterval);
       timers.forEach(clearTimeout);
     };
   }

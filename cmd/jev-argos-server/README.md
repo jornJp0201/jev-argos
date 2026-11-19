@@ -248,7 +248,7 @@ http.HandleFunc("POST /jev-argos/actions", func(w http.ResponseWriter, r *http.R
 | `POST /api/actions` | 管理トークン | 管理者による起票 |
 | `POST /api/actions/{id}/approve`、`/reject` | 管理トークン | 承認 (実行) / 拒否 |
 | `GET /api/blocklist`、`POST /api/blocklist`、`DELETE /api/blocklist?target=...` | 管理トークン | 遮断リストの参照・手動の遮断・解除 |
-| `GET /api/actions/stream`、`/api/blocklist/stream`、`/api/events/stream` | 管理トークン | 承認キュー・遮断リスト・判定と LLM 分析の SSE 配信 |
+| `GET /api/actions/stream`、`/api/blocklist/stream`、`/api/events/stream` | 管理トークン | 承認キュー・遮断リスト・判定と LLM 分析の SSE 配信。判定は Level 2 以上を 1 件ずつ、Level 1 は 1 秒ごとの件数 (`summary`) で送る |
 
 ## ヘルスチェック
 

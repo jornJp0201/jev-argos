@@ -42,7 +42,7 @@ function SourcePill({ status, paused }: { status: StreamStatus; paused: boolean 
 
 export function App() {
   const [paused, setPaused] = useState(false);
-  const { events, ipAnalyses, status } = useSignalStream(source, paused);
+  const { events, summaries, ipAnalyses, status } = useSignalStream(source, paused);
   const [selectedId, setSelectedId] = useState<string>();
   const lastSelected = useRef<DecisionEvent>();
   const actions = useActions();
@@ -77,7 +77,7 @@ export function App() {
         </div>
       </header>
 
-      <Overview events={events} />
+      <Overview events={events} summaries={summaries} />
 
       <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_380px]">
         <PendingActions

@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState } from "react";
-import type { DataSource, DecisionEvent, LlmAnalysis } from "../types";
+import type { DataSource, DecisionEvent, Level1Summary, LlmAnalysis } from "../types";
 
 /** 画面に保持するイベント数の上限 (古いものから捨てる)。 */
 const MAX_EVENTS = 2_000;
+/** Level 1 の集計を保持する期間 (概況の時間窓)。 */
+const SUMMARY_RETENTION_MS = 5 * 60_000;
 
 export type StreamStatus = "connecting" | "live" | "offline";
 
@@ -10,13 +12,16 @@ export type StreamStatus = "connecting" | "live" | "offline";
  * DataSource を購読し、新しい順のイベント一覧を返す。
  * paused 中も受信と集計は続け、一覧の表示だけを止める (再開時に追いつく)。
  * ipAnalyses は送信元 IP ごとの最新の LLM 分析 (同じ送信元の別のシグナルを選んでも参照できるように)。
+ * summaries は Level 1 の判定の集計 (新しい順)。Level 1 は events には含まれない。
  */
 export function useSignalStream(source: DataSource, paused: boolean) {
   const store = useRef<DecisionEvent[]>([]);
   const seen = useRef(new Set<string>());
   const byIp = useRef(new Map<string, LlmAnalysis>());
+  const summaryStore = useRef<Level1Summary[]>([]);
   const [events, setEvents] = useState<DecisionEvent[]>([]);
   const [ipAnalyses, setIpAnalyses] = useState<ReadonlyMap<string, LlmAnalysis>>(new Map());
+  const [summaries, setSummaries] = useState<Level1Summary[]>([]);
   const [status, setStatus] = useState<StreamStatus>("connecting");
   const pausedRef = useRef(paused);
   pausedRef.current = paused;
@@ -27,6 +32,7 @@ export function useSignalStream(source: DataSource, paused: boolean) {
       scheduled = false;
       if (!pausedRef.current) setEvents(store.current.slice());
       setIpAnalyses(new Map(byIp.current));
+      setSummaries(summaryStore.current.slice());
     };
     const schedule = () => {
       if (!scheduled) {
@@ -46,6 +52,18 @@ export function useSignalStream(source: DataSource, paused: boolean) {
         while (store.current.length > MAX_EVENTS) seen.current.delete(store.current.pop()!.signal.signal_id);
         schedule();
       },
+      onSummary: (s) => {
+        const t = Date.parse(s.timestamp);
+        const list = summaryStore.current;
+        // 再接続時に送り直された集計は捨てる。新しい順に並べる
+        if (list.some((x) => x.timestamp === s.timestamp)) return;
+        let i = 0;
+        while (i < list.length && Date.parse(list[i]!.timestamp) > t) i++;
+        list.splice(i, 0, s);
+        const cutoff = Date.now() - SUMMARY_RETENTION_MS;
+        while (list.length > 0 && Date.parse(list[list.length - 1]!.timestamp) < cutoff) list.pop();
+        schedule();
+      },
       onLlmUpdate: (id, ip, llm) => {
         const i = store.current.findIndex((e) => e.signal.signal_id === id);
         if (i >= 0) store.current[i] = { ...store.current[i]!, llm };
@@ -61,5 +79,5 @@ export function useSignalStream(source: DataSource, paused: boolean) {
     if (!paused) setEvents(store.current.slice());
   }, [paused]);
 
-  return { events, ipAnalyses, status };
+  return { events, summaries, ipAnalyses, status };
 }

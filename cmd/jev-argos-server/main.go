@@ -97,6 +97,7 @@ func run(cfg config, logger *slog.Logger) error {
 	}
 	defer stores.close()
 	hub := events.NewHub(0, logger) // ダッシュボードへのリアルタイム配信
+	hub.Start(ctx)                  // Level 1 の判定を 1 秒ごとに集計して配信する
 
 	var llmEmitter *llm.Emitter
 	provider, err := newLLMProvider(ctx, cfg, logger)

@@ -29,7 +29,7 @@ interface Props {
 }
 
 export function SignalTable({ events, selectedId, onSelect, paused, onTogglePause }: Props) {
-  const [levels, setLevels] = useState<Set<Level>>(new Set([1, 2, 3, 4]));
+  const [levels, setLevels] = useState<Set<Level>>(new Set([2, 3, 4]));
   const [query, setQuery] = useState("");
 
   const rows = useMemo(() => {
@@ -57,7 +57,8 @@ export function SignalTable({ events, selectedId, onSelect, paused, onTogglePaus
       <header className="flex flex-wrap items-center gap-3 border-b border-white/5 px-4 py-3">
         <h2 className="text-sm font-semibold text-slate-100">Signal Stream</h2>
         <div className="flex gap-1">
-          {([1, 2, 3, 4] as Level[]).map((l) => (
+          {/* Level 1 は件数だけが届くため一覧には出ない (概況に集計して表示する) */}
+          {([2, 3, 4] as Level[]).map((l) => (
             <button
               key={l}
               onClick={() => toggle(l)}

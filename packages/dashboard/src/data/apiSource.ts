@@ -1,7 +1,7 @@
 // コントロールサーバーの判定と LLM 分析を受け取る DataSource (GET /api/events/stream)。
 // 認証ヘッダーは開発サーバーのプロキシ (vite.config.ts) または本番のリバースプロキシが付与する。
 
-import type { DataSource, DecisionEvent, Level, LlmAnalysis } from "../types";
+import type { DataSource, DecisionEvent, Level, Level1Summary, LlmAnalysis } from "../types";
 
 interface ServerDecision {
   signal: DecisionEvent["signal"];
@@ -47,6 +47,9 @@ export class ApiDataSource implements DataSource {
         level: Math.min(4, Math.max(1, d.level)) as Level,
         downgraded: d.downgraded,
       });
+    });
+    es.addEventListener("summary", (e) => {
+      handlers.onSummary(JSON.parse((e as MessageEvent<string>).data) as Level1Summary);
     });
     es.addEventListener("analysis", (e) => {
       const m = JSON.parse((e as MessageEvent<string>).data) as ServerAnalysis;
