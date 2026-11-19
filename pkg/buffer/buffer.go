@@ -3,7 +3,8 @@
 //
 // 実装は 2 種類あり、設定で切り替える (設計書 7.2):
 //   - MemoryBuffer: 単一プロセス内で集計する (開発用・Zero Config)
-//   - RedisBuffer: Redis 上で集計し、複数のサーバーインスタンスで統計を共有する (本番用)
+//   - RedisBuffer: Redis 上で集計し、複数のサーバーインスタンスで統計を共有する (本番用)。
+//     平常時レイテンシの基準値だけは各インスタンスのメモリで計算し、定期的に Redis とすり合わせる
 package buffer
 
 import (
@@ -62,8 +63,18 @@ type Features struct {
 	LatencySpikeRatio     float64 // 当該メソッドの平常時平均レイテンシに対する比率
 }
 
+// SignalObserver は Observe の処理 (比率の算出 → 記録 → 2 つの窓の集計) をまとめて行える Buffer が実装する (任意)。
+// Buffer のメソッドを順に呼ぶと外部ストアへの往復が 4 回になるため、RedisBuffer はこれを実装して 1 回にしている。
+type SignalObserver interface {
+	ObserveSignal(ctx context.Context, signal *jevargosv1.SecuritySignal) (Features, error)
+}
+
 // Observe はシグナルを b に記録し、記録後の統計から Features を組み立てる。
+// b が SignalObserver を実装していればそちらを使う。
 func Observe(ctx context.Context, b Buffer, signal *jevargosv1.SecuritySignal) (Features, error) {
+	if o, ok := b.(SignalObserver); ok {
+		return o.ObserveSignal(ctx, signal)
+	}
 	ip := signal.GetUserContext().GetClientIp()
 	ratio, err := b.GetLatencySpikeRatio(ctx,
 		signal.GetRequestContext().GetMethod(),

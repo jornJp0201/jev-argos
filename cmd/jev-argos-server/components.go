@@ -78,10 +78,11 @@ func newBuffer(ctx context.Context, rdb *redis.Client, logger *slog.Logger) (buf
 		logger.Info("using in-memory buffer")
 		return b, nil
 	}
-	b, err := buffer.NewRedisBuffer(rdb, buffer.RedisOptions{})
+	b, err := buffer.NewRedisBuffer(rdb, buffer.RedisOptions{Logger: logger})
 	if err != nil {
 		return nil, err
 	}
+	b.Start(ctx) // レイテンシの基準値を他のインスタンスとすり合わせる
 	logger.Info("using redis buffer", "addr", rdb.Options().Addr)
 	return b, nil
 }
