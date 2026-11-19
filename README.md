@@ -1,5 +1,7 @@
 # jev-argos
 
+[![CI](https://github.com/jornJp0201/jev-argos/actions/workflows/ci.yml/badge.svg)](https://github.com/jornJp0201/jev-argos/actions/workflows/ci.yml)
+
 **Web サービスの BFF / バックエンドに組み込む、攻撃の検知と遮断のためのライブラリ。**
 
 アプリにアダプター (ミドルウェア) を組み込むと、リクエストの情報が判定サーバーに送られ、送信元ごとの直近の振る舞いから攻撃を見つけます。

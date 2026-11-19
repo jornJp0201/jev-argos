@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go:
+    name: Go (test -race, vet, gofmt)
+    runs-on: ubuntu-latest
+    services:
+      # 承認キュー・判定ログの結合テスト用 (JEV_ARGOS_TEST_POSTGRES_URL が無いとスキップされる)
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: jevargos
+          POSTGRES_PASSWORD: jevargos
+          POSTGRES_DB: jevargos_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U jevargos -d jevargos_test"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+    env:
+      JEV_ARGOS_TEST_POSTGRES_URL: postgres://jevargos:jevargos@localhost:5432/jevargos_test?sslmode=disable
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l cmd pkg)
+          if [ -n "$unformatted" ]; then
+            echo "gofmt が必要なファイル:"; echo "$unformatted"; exit 1
+          fi
+      - run: go vet ./...
+      - run: go test -race -count=1 -coverprofile=coverage.out ./...
+      - name: Coverage summary
+        run: go tool cover -func=coverage.out | tail -1 >> "$GITHUB_STEP_SUMMARY"
+
+  node:
+    name: TypeScript (build, test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4 # バージョンは package.json の packageManager に従う
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: pnpm test
+
+  docker:
+    name: Docker images (build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t jev-argos/server .
+      - run: docker build -f packages/dashboard/Dockerfile -t jev-argos/dashboard .
