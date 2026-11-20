@@ -26,6 +26,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/health"
@@ -123,7 +124,9 @@ func run(cfg config, logger *slog.Logger) error {
 		}
 		llmEmitter.Start(ctx)
 	}
-	emitters := newEmitters(cfg, stores, actions, blocklist, llmEmitter, logger)
+	proposer := &approval.ProposeEmitter{Store: actions, Logger: logger, Window: approval.DefaultProposeWindow}
+	proposer.Start(ctx)
+	lanes := newLanes(cfg, stores, proposer, blocklist, llmEmitter, logger)
 
 	// --- gRPC: シグナル受信・遮断リスト配信・ヘルスチェック ---
 	guard := guardrail.New(guardrail.Guardrail{
@@ -132,7 +135,7 @@ func run(cfg config, logger *slog.Logger) error {
 		Level3Score:     cfg.level3Score,
 		Level2Score:     cfg.level2Score,
 	})
-	srv := receiver.NewServer(buf, classifier.NewDefault(), emitters, receiver.Options{Logger: logger, Observer: hub.PublishDecision, Guardrail: &guard})
+	srv := receiver.NewServer(buf, classifier.NewDefault(), nil, receiver.Options{Lanes: lanes, Logger: logger, Observer: hub.PublishDecision, Guardrail: &guard})
 	gs := grpc.NewServer()
 	jevargosv1.RegisterSignalServiceServer(gs, srv)
 	jevargosv1.RegisterControlServiceServer(gs, &action.ControlServer{Blocklist: blocklist})
@@ -186,8 +189,14 @@ func run(cfg config, logger *slog.Logger) error {
 	stopAPI()
 	gs.GracefulStop()
 	srv.Close()
-	if n := srv.Dropped(); n > 0 {
-		logger.Warn("events dropped before reaching emitter", "count", n)
+	// 判定の処理を止めた後に、まとめている提案を書く (判定ログの残りは stores.close で保存する)
+	flushCtx, cancelFlush := context.WithTimeout(context.Background(), 5*time.Second)
+	proposer.Flush(flushCtx)
+	cancelFlush()
+	for name, n := range srv.DroppedByLane() {
+		if n > 0 {
+			logger.Warn("events dropped before reaching emitter", "lane", name, "count", n)
+		}
 	}
 	return err
 }
