@@ -83,8 +83,11 @@ type SecuritySignal struct {
 	RequestContext  *RequestContext        `protobuf:"bytes,5,opt,name=request_context,json=requestContext,proto3" json:"request_context,omitempty"`
 	ResponseContext *ResponseContext       `protobuf:"bytes,6,opt,name=response_context,json=responseContext,proto3" json:"response_context,omitempty"`
 	TraceId         string                 `protobuf:"bytes,7,opt,name=trace_id,json=traceId,proto3" json:"trace_id,omitempty"` // フロントエンド・他サービスとの追跡用キー
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// アダプターが正常な応答を間引いて送った場合の、送った割合 (例: 0.1 なら 10 件に 1 件)。
+	// サーバーはこのシグナルを 1/sample_rate 件ぶんとして数える。0 (未指定) なら間引いていない。
+	SampleRate    float64 `protobuf:"fixed64,8,opt,name=sample_rate,json=sampleRate,proto3" json:"sample_rate,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *SecuritySignal) Reset() {
@@ -164,6 +167,13 @@ func (x *SecuritySignal) GetTraceId() string {
 		return x.TraceId
 	}
 	return ""
+}
+
+func (x *SecuritySignal) GetSampleRate() float64 {
+	if x != nil {
+		return x.SampleRate
+	}
+	return 0
 }
 
 // ユーザー・クライアント情報
@@ -602,7 +612,7 @@ var File_signal_proto protoreflect.FileDescriptor
 
 const file_signal_proto_rawDesc = "" +
 	"\n" +
-	"\fsignal.proto\x12\vjevargos.v1\"\xd9\x02\n" +
+	"\fsignal.proto\x12\vjevargos.v1\"\xfa\x02\n" +
 	"\x0eSecuritySignal\x12\x1b\n" +
 	"\tsignal_id\x18\x01 \x01(\tR\bsignalId\x12\x1c\n" +
 	"\ttimestamp\x18\x02 \x01(\tR\ttimestamp\x12%\n" +
@@ -610,7 +620,9 @@ const file_signal_proto_rawDesc = "" +
 	"\fuser_context\x18\x04 \x01(\v2\x18.jevargos.v1.UserContextR\vuserContext\x12D\n" +
 	"\x0frequest_context\x18\x05 \x01(\v2\x1b.jevargos.v1.RequestContextR\x0erequestContext\x12G\n" +
 	"\x10response_context\x18\x06 \x01(\v2\x1c.jevargos.v1.ResponseContextR\x0fresponseContext\x12\x19\n" +
-	"\btrace_id\x18\a \x01(\tR\atraceId\"\xa2\x01\n" +
+	"\btrace_id\x18\a \x01(\tR\atraceId\x12\x1f\n" +
+	"\vsample_rate\x18\b \x01(\x01R\n" +
+	"sampleRate\"\xa2\x01\n" +
 	"\vUserContext\x12\x17\n" +
 	"\auser_id\x18\x01 \x01(\tR\x06userId\x12\x1b\n" +
 	"\tuser_role\x18\x02 \x01(\tR\buserRole\x12\x1b\n" +

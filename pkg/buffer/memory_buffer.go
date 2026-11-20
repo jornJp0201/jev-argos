@@ -59,9 +59,10 @@ func (b *MemoryBuffer) RecordSignal(_ context.Context, signal *jevargosv1.Securi
 
 	if resp.GetStatusCode() == 0 {
 		// 異常応答は平常時の基準を汚さないよう平均に含めない。
+		// 間引かれて届いた正常応答は、送られなかった分も含めて 1/sample_rate 件ぶんとして反映する。
 		latency := float64(resp.GetLatencyMs())
 		if baseline, ok := b.latency[method]; ok {
-			b.latency[method] = baseline + latencyAlpha*(latency-baseline)
+			b.latency[method] = mergeLatency(baseline, latency, SampleWeight(signal))
 		} else {
 			b.latency[method] = latency
 		}

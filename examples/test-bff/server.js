@@ -10,12 +10,15 @@ import { BlocklistWatcher, SignalReporter, createExpressMiddleware } from "@jorn
 
 const PORT = Number(process.env.PORT ?? 4000);
 const JEV_ARGOS_TARGET = process.env.JEV_ARGOS_TARGET ?? "localhost:50051";
+const SAMPLE_RATE = Number(process.env.JEV_ARGOS_SAMPLE_RATE ?? 0.1);
 
 // --- jev-argos の組み込み (1/3): シグナルの送信と遮断リストの購読 ---
 // onResponse / onChange は任意 (ここでは録画で見やすいよう、変化があったときだけログを出している)
 const level4 = new Set();
 const reporter = new SignalReporter({
   target: JEV_ARGOS_TARGET,
+  // 正常な応答は 10% だけ送る (エラーと遅い応答はすべて送る)。1 にすると全件送る
+  sampling: { rate: SAMPLE_RATE },
   onResponse: (res, signal) => {
     const ip = signal.user_context?.client_ip;
     if (res.immediate_action_level >= 4 && !level4.has(ip)) {

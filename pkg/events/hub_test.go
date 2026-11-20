@@ -125,6 +125,30 @@ func TestHub_Level1IsSummarized(t *testing.T) {
 	}
 }
 
+// アダプターが間引いて送ったシグナルは、送られなかった分を含めて数える。
+func TestHub_Level1CountsSampleWeight(t *testing.T) {
+	h := NewHub(10, nil)
+	_, updates, cancel := h.Subscribe()
+	defer cancel()
+
+	e := event("l1", guardrail.Level1)
+	e.Assessment.Score = 0.1
+	e.Signal.SampleRate = 0.1 // 10 件ぶん
+	h.PublishDecision(e)
+	plain := event("l1", guardrail.Level1) // 間引かれていない (1 件ぶん)
+	plain.Assessment.Score = 0.2
+	h.PublishDecision(plain)
+	h.flushSummary(time.Now())
+
+	var s Summary
+	if err := json.Unmarshal((<-updates).Data, &s); err != nil {
+		t.Fatal(err)
+	}
+	if s.Count != 11 || math.Abs(s.ScoreSum-1.2) > 1e-9 { // 0.1 × 10 + 0.2
+		t.Errorf("summary = %+v, want count 11 and score_sum 1.2", s)
+	}
+}
+
 func TestRing(t *testing.T) {
 	r := newRing[int](3)
 	if got := r.items(); len(got) != 0 {

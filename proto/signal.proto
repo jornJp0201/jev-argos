@@ -24,6 +24,10 @@ message SecuritySignal {
   ResponseContext response_context = 6;
   
   string trace_id = 7;         // フロントエンド・他サービスとの追跡用キー
+
+  // アダプターが正常な応答を間引いて送った場合の、送った割合 (例: 0.1 なら 10 件に 1 件)。
+  // サーバーはこのシグナルを 1/sample_rate 件ぶんとして数える。0 (未指定) なら間引いていない。
+  double sample_rate = 8;
 }
 
 // ユーザー・クライアント情報

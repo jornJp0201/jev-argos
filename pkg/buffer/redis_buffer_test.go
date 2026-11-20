@@ -123,6 +123,24 @@ func TestRedisBuffer_LatencySyncMerges(t *testing.T) {
 	}
 }
 
+// 間引かれて届いた正常応答は、すり合わせでも 1/sample_rate 件ぶんとして全体の基準値に混ぜる。
+func TestRedisBuffer_LatencySyncSampleWeight(t *testing.T) {
+	_, client := newTestRedis(t)
+	a := newTestRedisBuffer(t, client, RedisOptions{})
+	b := newTestRedisBuffer(t, client, RedisOptions{})
+
+	record(t, a, signal("1.1.1.1", "/a", codeOK, 100))
+	syncLatency(t, a)
+	s := signal("2.2.2.2", "/a", codeOK, 300)
+	s.SampleRate = 0.5
+	record(t, b, s)
+	syncLatency(t, b) // 平均 300 の 2 件ぶん: 138
+	syncLatency(t, a)
+	if got := ratio(t, a, "/a", 276); math.Abs(got-2) > 1e-9 {
+		t.Errorf("ratio = %v, want 2 (baseline 138)", got)
+	}
+}
+
 // すり合わせに失敗した観測は捨てず、次回に送る。
 func TestRedisBuffer_LatencySyncRetries(t *testing.T) {
 	mr, client := newTestRedis(t)

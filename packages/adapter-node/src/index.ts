@@ -10,6 +10,7 @@ export {
   type RouteHandlerOptions,
 } from "./middleware.js";
 export { SignalReporter, type Reporter, type ReporterOptions, type ReporterStats } from "./reporter.js";
+export { Sampler, type SamplingOptions } from "./sampling.js";
 export {
   buildSignal,
   maskMetadata,

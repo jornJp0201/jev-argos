@@ -7,6 +7,7 @@
 import { fileURLToPath } from "node:url";
 import * as grpc from "@grpc/grpc-js";
 import * as protoLoader from "@grpc/proto-loader";
+import { Sampler, type SamplingOptions } from "./sampling.js";
 import type { ReportResponse, SecuritySignal } from "./signal.js";
 
 /** シグナルの送信先。インターセプターはこのインターフェースだけに依存する。 */
@@ -36,12 +37,19 @@ export interface ReporterOptions {
    * 遮断には BlocklistWatcher を使うこと。
    */
   batch?: { maxSize?: number; flushIntervalMs?: number };
+  /**
+   * 正常な応答を間引いて送る (既定は全件送る)。エラーと遅い応答は必ず送る。
+   * [差し替えポイント] 送る量を減らしたい場合は rate (例: 0.1) を指定する。詳しくは SamplingOptions を参照。
+   */
+  sampling?: SamplingOptions;
 }
 
 export interface ReporterStats {
   sent: number;
   failed: number;
   dropped: number;
+  /** sampling により送らなかった正常な応答の数。 */
+  skipped: number;
   inFlight: number;
 }
 
@@ -85,7 +93,8 @@ export class SignalReporter implements Reporter {
   private readonly maxInFlight: number;
   private readonly onError: ReporterOptions["onError"];
   private readonly onResponse: ReporterOptions["onResponse"];
-  private readonly counters = { sent: 0, failed: 0, dropped: 0 };
+  private readonly counters = { sent: 0, failed: 0, dropped: 0, skipped: 0 };
+  private readonly sampler: Sampler | undefined;
   private inFlight = 0;
   private closed = false;
   private idleWaiters: Array<() => void> = [];
@@ -100,13 +109,18 @@ export class SignalReporter implements Reporter {
     this.maxInFlight = opts.maxInFlight ?? 1000;
     this.onError = opts.onError;
     this.onResponse = opts.onResponse;
+    this.sampler = Sampler.create(opts.sampling);
     if (opts.batch) {
       this.batch = { maxSize: opts.batch.maxSize ?? 50, flushIntervalMs: opts.batch.flushIntervalMs ?? 100 };
     }
   }
 
-  /** シグナルを非同期に送信する。すぐに戻り、例外は投げない。 */
+  /** シグナルを非同期に送信する。すぐに戻り、例外は投げない。sampling で間引かれた正常な応答は送らない。 */
   report(signal: SecuritySignal): void {
+    if (this.sampler && !this.sampler.keep(signal)) {
+      this.counters.skipped++;
+      return;
+    }
     if (this.closed || this.inFlight + this.pending.length >= this.maxInFlight) {
       this.counters.dropped++;
       return;

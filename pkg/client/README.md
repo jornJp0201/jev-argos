@@ -23,6 +23,7 @@ grpc.NewServer(grpc.ChainUnaryInterceptor(client.UnaryServerInterceptor(reporter
 
 - 送信はすべてバックグラウンドで行い、失敗してもアプリの処理には影響しない (Fire-and-Forget)。
 - `BlocklistWatcher` は遮断リストの手元のコピーを見るだけなので、リクエストごとの通信は発生しない。接続が切れても自動で再接続する。
+- `ReporterOptions.Sampling` で正常な応答を間引いて送れる (既定は全件送る)。下記を参照。
 - HTTP のルートは Go 1.22+ の ServeMux が設定する `r.Pattern` を送る (URL 中の ID は送らない)。どのルートにも一致しなかったリクエストは `(unmatched)` になる。
 
 ## 差し替えポイント
@@ -33,3 +34,16 @@ grpc.NewServer(grpc.ChainUnaryInterceptor(client.UnaryServerInterceptor(reporter
 | ルートのパターンの取り出し方 (chi 等) | `client.Options.Route` | ServeMux の `r.Pattern` |
 | 遮断したリクエストへの応答 | `client.Options.OnBlocked` | 403 `{"error":"forbidden"}` |
 | 判定サーバーとの通信の暗号化 | `grpc.NewClient` の認証情報 | 平文 (クラスタ外を通る場合は TLS にする) |
+| 送る量 (正常な応答の間引き) | `client.ReporterOptions.Sampling` | 全件送る |
+
+## 送る量を減らす (正常な応答の間引き)
+
+```go
+reporter := client.NewReporter(conn, client.ReporterOptions{Sampling: client.Sampling{Rate: 0.1}}) // 正常な応答は 10% だけ送る
+```
+
+- **エラーはすべて送る**。攻撃の判定に使う統計 (エラー数・権限エラーを起こした API の数) はエラーだけから数えるため、判定は変わらない
+- **遅い応答は必ず送る**。API ごとの手元の平均の `SlowFactor` 倍 (既定 2) か、`SlowThreshold` を超えた応答。処理時間の急増を見逃さないため
+- 送った正常な応答には `sample_rate` が付き、サーバーは 1/sample_rate 件ぶんとして、レイテンシの基準値とダッシュボードの件数に反映する
+- 間引いた応答には判定が返らないため、`OnResponse` は呼ばれない (遮断には `BlocklistWatcher` を使う)。送らなかった数は `Stats().Skipped` で分かる
+- 間引くと、レイテンシの基準値のばらつきが大きくなる。10% では、処理時間の急増の検知が全件のときの約 9 割になる ([ルートの README の測定](../../README.md#正常な応答まで-1-件ずつ送っていた))

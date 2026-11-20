@@ -34,6 +34,8 @@ export interface SecuritySignal {
   request_context: RequestContext;
   response_context: ResponseContext;
   trace_id: string;
+  /** 正常な応答を間引いて送った場合の、送った割合 (ReporterOptions.sampling が設定する)。未指定なら間引いていない。 */
+  sample_rate?: number;
 }
 
 export interface ReportResponse {

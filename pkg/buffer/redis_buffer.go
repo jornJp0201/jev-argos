@@ -68,9 +68,10 @@ type RedisBuffer struct {
 }
 
 // latencySample は 1 つのメソッドについて、すり合わせの間隔内に観測した正常応答のレイテンシの合計と件数。
+// 間引かれて届いた正常応答は 1/sample_rate 件ぶんとして数えるため、件数は小数になりうる。
 type latencySample struct {
 	sum float64
-	n   int64
+	n   float64
 }
 
 var (
@@ -172,7 +173,7 @@ func (b *RedisBuffer) SyncLatency(ctx context.Context) error {
 	args := make([]any, 0, 1+3*len(pending))
 	args = append(args, latencyAlpha)
 	for method, s := range pending {
-		args = append(args, method, s.sum/float64(s.n), s.n)
+		args = append(args, method, s.sum/s.n, s.n)
 	}
 	res, err := syncLatencyScript.Run(ctx, b.client, []string{b.latencyKey()}, args...).StringSlice()
 	if err != nil {
@@ -211,7 +212,7 @@ func (b *RedisBuffer) ObserveSignal(ctx context.Context, signal *jevargosv1.Secu
 	ratio := b.spikeRatio(method, resp.GetLatencyMs())
 	ok := resp.GetStatusCode() == 0
 	if ok {
-		b.observeLatency(method, resp.GetLatencyMs())
+		b.observeLatency(method, resp.GetLatencyMs(), SampleWeight(signal))
 	}
 
 	nowMs := b.now().UnixMilli()
@@ -246,7 +247,7 @@ func (b *RedisBuffer) RecordSignal(ctx context.Context, signal *jevargosv1.Secur
 	method := signal.GetRequestContext().GetMethod()
 	resp := signal.GetResponseContext()
 	if resp.GetStatusCode() == 0 {
-		b.observeLatency(method, resp.GetLatencyMs())
+		b.observeLatency(method, resp.GetLatencyMs(), SampleWeight(signal))
 		return nil
 	}
 	_, err := b.client.TxPipelined(ctx, func(p redis.Pipeliner) error {
@@ -315,18 +316,18 @@ func (b *RedisBuffer) spikeRatio(method string, latencyMs int64) float64 {
 	return spikeRatio(baseline, ok, latencyMs)
 }
 
-// observeLatency は正常応答のレイテンシを手元の基準値に反映し、次回のすり合わせで送る観測に加える。
-func (b *RedisBuffer) observeLatency(method string, latencyMs int64) {
+// observeLatency は正常応答のレイテンシ weight 件ぶんを手元の基準値に反映し、次回のすり合わせで送る観測に加える。
+func (b *RedisBuffer) observeLatency(method string, latencyMs int64, weight float64) {
 	latency := float64(latencyMs)
 	b.latencyMu.Lock()
 	defer b.latencyMu.Unlock()
 	if baseline, ok := b.baseline[method]; ok {
-		b.baseline[method] = baseline + latencyAlpha*(latency-baseline)
+		b.baseline[method] = mergeLatency(baseline, latency, weight)
 	} else {
 		b.baseline[method] = latency
 	}
 	s := b.pending[method]
-	b.pending[method] = latencySample{sum: s.sum + latency, n: s.n + 1}
+	b.pending[method] = latencySample{sum: s.sum + weight*latency, n: s.n + weight}
 }
 
 // windowMin は直近 windowSeconds 秒の窓の下限を返す。

@@ -9,6 +9,7 @@ package buffer
 
 import (
 	"context"
+	"math"
 
 	jevargosv1 "github.com/jornJp0201/jev-argos/gen/v1"
 )
@@ -27,6 +28,26 @@ const codePermissionDenied = 7
 
 // latencyAlpha は平常時レイテンシ (EWMA) の平滑化係数。
 const latencyAlpha = 0.1
+
+// maxSampleWeight は 1 件のシグナルが表せる件数の上限 (sample_rate 0.01 に相当)。
+// 極端に小さい sample_rate で、1 件が基準値や件数を大きく動かさないようにする。
+const maxSampleWeight = 100
+
+// SampleWeight はシグナルが何件ぶんの応答を表すかを返す。
+// アダプターが正常な応答を間引いて送った場合は 1/sample_rate、間引いていなければ 1。
+func SampleWeight(signal *jevargosv1.SecuritySignal) float64 {
+	r := signal.GetSampleRate()
+	if r <= 0 || r >= 1 {
+		return 1
+	}
+	return min(1/r, maxSampleWeight)
+}
+
+// mergeLatency は基準値 (EWMA) に、平均 mean の観測 weight 件ぶんを反映した値を返す。
+// EWMA を weight 回適用したときと同じ重み 1-(1-α)^weight で混ぜる。
+func mergeLatency(baseline, mean, weight float64) float64 {
+	return baseline + (1-math.Pow(1-latencyAlpha, weight))*(mean-baseline)
+}
 
 // WindowStats は 1 つの IP について、指定ウィンドウ内で集計した統計。
 type WindowStats struct {

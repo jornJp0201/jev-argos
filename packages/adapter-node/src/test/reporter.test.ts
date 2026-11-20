@@ -24,7 +24,7 @@ describe("SignalReporter", () => {
       const [got] = await collector.waitFor(1);
       assert.equal(got?.request_context.method, "/a.A/One");
       await reporter.close();
-      assert.deepEqual(reporter.stats, { sent: 1, failed: 0, dropped: 0, inFlight: 0 });
+      assert.deepEqual(reporter.stats, { sent: 1, failed: 0, dropped: 0, skipped: 0, inFlight: 0 });
     } finally {
       collector.close();
     }
@@ -71,7 +71,7 @@ describe("SignalReporter", () => {
       assert.equal(reporter.stats.dropped, 3);
       await reporter.close();
       reporter.report(signal());
-      assert.deepEqual(reporter.stats, { sent: 2, failed: 0, dropped: 4, inFlight: 0 });
+      assert.deepEqual(reporter.stats, { sent: 2, failed: 0, dropped: 4, skipped: 0, inFlight: 0 });
     } finally {
       collector.close();
     }
@@ -96,7 +96,7 @@ describe("SignalReporter", () => {
       const sorted = (xs: number[]) => [...xs].sort((a, b) => a - b);
       assert.deepEqual(sorted(collector.batches), [5, 10, 10], "two full batches, then the rest after the interval");
       assert.deepEqual(sorted(levels), [1, 1, 4], "level is per batch (max)");
-      assert.deepEqual(reporter.stats, { sent: 25, failed: 0, dropped: 0, inFlight: 0 });
+      assert.deepEqual(reporter.stats, { sent: 25, failed: 0, dropped: 0, skipped: 0, inFlight: 0 });
     } finally {
       collector.close();
     }

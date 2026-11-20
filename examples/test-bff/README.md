@@ -37,6 +37,7 @@ node examples/test-bff/server.js        # http://localhost:4000
 | --- | --- | --- |
 | `PORT` | `4000` | このアプリのポート |
 | `JEV_ARGOS_TARGET` | `localhost:50051` | jev-argos-server の gRPC アドレス |
+| `JEV_ARGOS_SAMPLE_RATE` | `0.1` | 正常な応答を送る割合。エラーと遅い応答はすべて送る。`1` で全件送る |
 | `TRUST_PROXY` | `true` | `X-Forwarded-For` を信頼するか (下記) |
 
 ## API (すべてダミー)

@@ -213,6 +213,20 @@ new grpc.Server({ interceptors: [createServerInterceptor(reporter, { sourceServi
 const reporter = new SignalReporter({ target: "localhost:50051", batch: { maxSize: 50, flushIntervalMs: 100 } });
 ```
 
+### 送る量を減らす (正常な応答の間引き)
+
+`sampling` を指定すると、正常な応答を一部だけ送る (既定は全件送る)。リクエストの大半は正常な応答なので、送る量が大きく減る。
+
+```ts
+const reporter = new SignalReporter({ target: "localhost:50051", sampling: { rate: 0.1 } }); // 正常な応答は 10% だけ送る
+```
+
+- **エラーはすべて送る**。攻撃の判定に使う統計 (エラー数・権限エラーを起こした API の数) はエラーだけから数えるため、判定は変わらない
+- **遅い応答は必ず送る**。API ごとの手元の平均の `slowFactor` 倍 (既定 2) か、`slowThresholdMs` を超えた応答。処理時間の急増を見逃さないため
+- 送った正常な応答には `sample_rate` が付き、サーバーは 1/sample_rate 件ぶんとして、レイテンシの基準値とダッシュボードの件数に反映する
+- 間引いた応答には判定が返らないため、`onResponse` は呼ばれない (遮断には `BlocklistWatcher` を使う)。送らなかった数は `stats.skipped` で分かる
+- 間引くと、レイテンシの基準値のばらつきが大きくなる。10% では、処理時間の急増の検知が全件のときの約 9 割になる ([ルートの README の測定](../../README.md#正常な応答まで-1-件ずつ送っていた))
+
 ### 終了処理
 
 ```ts
@@ -229,6 +243,7 @@ process.on("SIGTERM", async () => {
 | 項目 | 指定する場所 | 既定 |
 | --- | --- | --- |
 | ユーザー ID の取り出し方 (認証方式に合わせる) | gRPC: `extractUser`、HTTP: `reportHttp` の `userId` | 送らない |
+| 送る量 (正常な応答の間引き) | `sampling` | 全件送る |
 | クライアント IP の取り出し方 (プロキシの構成に合わせる) | Express の `trust proxy`、Next.js の `getClientIp`、gRPC の `trustProxyHeaders` | 接続元 / `x-forwarded-for` (Next.js) |
 | 遮断したリクエストへの応答 | `onBlocked` | 403 `{"error":"forbidden"}` |
 | コントロールサーバーとの通信の暗号化 | `credentials` | 平文 (クラスタ外を通る場合は TLS にする) |
@@ -248,6 +263,7 @@ process.on("SIGTERM", async () => {
 | `onResponse` | `(res, signal) => void` | — | サーバーの応答 (`immediate_action_level` を含む) を受け取る |
 | `onError` | `(err, signal) => void` | — | 送信失敗を受け取る (ログやメトリクス用) |
 | `batch` | `{ maxSize?, flushIntervalMs? }` | 無し (1 件ずつ送る) | バッチ送信。既定 50 件 / 100ms |
+| `sampling` | `{ rate, slowFactor?, slowThresholdMs? }` | 無し (全件送る) | 正常な応答を `rate` の割合だけ送る。エラーと遅い応答 (手元の平均の `slowFactor` 倍 (既定 2)、または `slowThresholdMs` 超え) は必ず送る |
 | `protoPath` | `string` | 同梱の `proto/signal.proto` | スキーマファイルの場所 |
 
 ### `new BlocklistWatcher(options)`

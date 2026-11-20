@@ -3,6 +3,7 @@ package buffer
 import (
 	"context"
 	"fmt"
+	"math"
 	"sync"
 	"testing"
 	"time"
@@ -167,6 +168,18 @@ func runContractTests(t *testing.T, newBuffer bufferFactory) {
 		}
 		if got := ratio(t, b, "/b", 500); got != 1 {
 			t.Errorf("other method ratio = %v, want 1", got)
+		}
+	})
+
+	// アダプターが間引いて送った正常応答は、1/sample_rate 件ぶんとして基準値に反映する。
+	t.Run("SampledSignalWeight", func(t *testing.T) {
+		b := newBuffer(t, newFakeClock().now, DefaultMaxEventsPerIP)
+		record(t, b, signal("1.1.1.1", "/a", codeOK, 100))
+		s := signal("1.1.1.1", "/a", codeOK, 300)
+		s.SampleRate = 0.5 // 2 件ぶん: 100 + (1 - 0.9^2) × (300 - 100) = 138
+		record(t, b, s)
+		if got := ratio(t, b, "/a", 276); math.Abs(got-2) > 1e-9 {
+			t.Errorf("ratio = %v, want 2 (baseline 138)", got)
 		}
 	})
 

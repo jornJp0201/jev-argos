@@ -47,17 +47,23 @@ type ReporterOptions struct {
 	// OnError は送信の失敗を受け取る (ログやメトリクス用)。
 	OnError func(error)
 	Logger  *slog.Logger
+
+	// Sampling を指定すると、正常な応答を間引いて送る (既定は全件送る)。エラーと遅い応答は必ず送る。
+	// [差し替えポイント] 送る量を減らしたい場合は Rate (例: 0.1) を指定する。詳しくは Sampling を参照。
+	Sampling Sampling
 }
 
 // Stats は送信の状況。
 type Stats struct {
 	Sent, Failed, Dropped uint64
+	Skipped               uint64 // Sampling により送らなかった正常な応答の数
 }
 
 // Reporter はシグナルをコントロールサーバーへ非同期に送る。
 type Reporter struct {
 	client  jevargosv1.SignalServiceClient
 	opts    ReporterOptions
+	sampler *sampler // nil なら全件送る
 	queue   chan *jevargosv1.SecuritySignal
 	wg      sync.WaitGroup
 	closed  atomic.Bool
@@ -65,6 +71,7 @@ type Reporter struct {
 	sent    atomic.Uint64
 	failed  atomic.Uint64
 	dropped atomic.Uint64
+	skipped atomic.Uint64
 }
 
 // NewReporter は Reporter を作り、送信用の goroutine を起動する。使い終わったら Close を呼ぶこと。
@@ -85,9 +92,10 @@ func NewReporter(conn grpc.ClientConnInterface, opts ReporterOptions) *Reporter 
 		opts.FlushInterval = 100 * time.Millisecond
 	}
 	r := &Reporter{
-		client: jevargosv1.NewSignalServiceClient(conn),
-		opts:   opts,
-		queue:  make(chan *jevargosv1.SecuritySignal, opts.QueueSize),
+		client:  jevargosv1.NewSignalServiceClient(conn),
+		opts:    opts,
+		sampler: newSampler(opts.Sampling),
+		queue:   make(chan *jevargosv1.SecuritySignal, opts.QueueSize),
 	}
 	if opts.Batch {
 		r.wg.Add(1)
@@ -102,7 +110,12 @@ func NewReporter(conn grpc.ClientConnInterface, opts ReporterOptions) *Reporter 
 }
 
 // Report はシグナルを送信待ちに入れてすぐに戻る。待ちが満杯なら破棄する。
+// Sampling を指定している場合、間引かれた正常な応答は送らない。
 func (r *Reporter) Report(s *jevargosv1.SecuritySignal) {
+	if r.sampler != nil && !r.sampler.keep(s) {
+		r.skipped.Add(1)
+		return
+	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	if r.closed.Load() {
@@ -118,7 +131,7 @@ func (r *Reporter) Report(s *jevargosv1.SecuritySignal) {
 
 // Stats は送信の状況を返す。
 func (r *Reporter) Stats() Stats {
-	return Stats{Sent: r.sent.Load(), Failed: r.failed.Load(), Dropped: r.dropped.Load()}
+	return Stats{Sent: r.sent.Load(), Failed: r.failed.Load(), Dropped: r.dropped.Load(), Skipped: r.skipped.Load()}
 }
 
 // Close は新しい送信を止め、送信待ちを送り終えるまで待つ (ctx の期限まで)。

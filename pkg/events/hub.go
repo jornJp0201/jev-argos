@@ -29,6 +29,7 @@ import (
 
 	"github.com/jornJp0201/jev-argos/pkg/api"
 	"github.com/jornJp0201/jev-argos/pkg/approval"
+	"github.com/jornJp0201/jev-argos/pkg/buffer"
 	"github.com/jornJp0201/jev-argos/pkg/guardrail"
 	"github.com/jornJp0201/jev-argos/pkg/receiver"
 )
@@ -78,6 +79,8 @@ const (
 	summaryBacklog = 300
 	// scoreScale はスコアの合計をロックなしで足すための固定小数点の倍率 (S ∈ [0, 4])。
 	scoreScale = 1e6
+	// countScale は件数を固定小数点で数えるための倍率 (間引かれて届いたシグナルは 1/sample_rate 件ぶんと数えるため)。
+	countScale = 1000
 )
 
 // entry は直近分の 1 件。購読者がいない間に届いた判定は data を持たず、接続されたときに JSON にする。
@@ -96,7 +99,7 @@ type Hub struct {
 	summaries ring[Message]
 	logger    *slog.Logger
 
-	level1Count atomic.Int64
+	level1Count atomic.Int64  // 件数 × countScale
 	level1Score atomic.Uint64 // スコアの合計 × scoreScale
 }
 
@@ -137,8 +140,10 @@ var marshalSignal = protojson.MarshalOptions{UseProtoNames: true, EmitUnpopulate
 // PublishDecision は判定を配信する。receiver.Options.Observer に渡す。
 func (h *Hub) PublishDecision(e receiver.Event) {
 	if e.Decision.Level < guardrail.Level2 {
-		h.level1Count.Add(1)
-		h.level1Score.Add(uint64(math.Round(e.Assessment.Score * scoreScale)))
+		// アダプターが正常な応答を間引いて送った場合も、送られなかった分を含めた件数を配信する
+		w := buffer.SampleWeight(e.Signal)
+		h.level1Count.Add(int64(math.Round(w * countScale)))
+		h.level1Score.Add(uint64(math.Round(e.Assessment.Score * w * scoreScale)))
 		return
 	}
 	var data json.RawMessage
@@ -208,7 +213,7 @@ func (h *Hub) flushSummary(now time.Time) {
 	}
 	data, err := json.Marshal(Summary{
 		Timestamp: now.UTC().Format(time.RFC3339Nano),
-		Count:     count,
+		Count:     int64(math.Round(float64(count) / countScale)),
 		ScoreSum:  float64(score) / scoreScale,
 	})
 	if err != nil {
