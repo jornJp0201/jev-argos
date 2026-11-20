@@ -39,6 +39,20 @@ func runStoreContract(t *testing.T, newStore func(t *testing.T) Store) {
 		}
 	})
 
+	t.Run("ProposeCount", func(t *testing.T) {
+		s := newStore(t)
+		q := p("10.0.0.1", "s1")
+		q.Count = 3 // ProposeEmitter が 3 件の判定をまとめた提案
+		a, err := s.Propose(ctx, q)
+		if err != nil || a.EventCount != 3 {
+			t.Fatalf("first = %+v, %v; want count 3", a, err)
+		}
+		q.Count = 2
+		if b, _ := s.Propose(ctx, q); b.ID != a.ID || b.EventCount != 5 {
+			t.Errorf("second = %+v, want the same action with count 5", b)
+		}
+	})
+
 	t.Run("Decide", func(t *testing.T) {
 		s := newStore(t)
 		a, _ := s.Propose(ctx, p("10.0.0.1", "s1"))

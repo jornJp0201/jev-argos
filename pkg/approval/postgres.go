@@ -155,17 +155,17 @@ func (s *PostgresStore) Propose(ctx context.Context, p Proposal) (Action, error)
 		}
 		row := tx.QueryRow(ctx, `
 			INSERT INTO jev_actions (id, signal_id, proposed_action, target, reason, source, irreversible, status, evidence, event_count, created_at, updated_at)
-			SELECT $1, $2, $3, $4, $5, $6, $7, 'pending', $8, 1, $9, $9
+			SELECT $1, $2, $3, $4, $5, $6, $7, 'pending', $8, $11, $9, $9
 			WHERE $10 OR EXISTS (SELECT 1 FROM jev_actions WHERE status = 'pending' AND proposed_action = $3 AND target = $4)
 			ON CONFLICT (proposed_action, target) WHERE status = 'pending' DO UPDATE SET
 			    signal_id   = EXCLUDED.signal_id,
 			    reason      = EXCLUDED.reason,
 			    evidence    = EXCLUDED.evidence,
-			    event_count = jev_actions.event_count + 1,
+			    event_count = jev_actions.event_count + EXCLUDED.event_count,
 			    updated_at  = EXCLUDED.updated_at
 			RETURNING `+actionColumns,
 			id, p.SignalID, string(p.ProposedAction), p.Target, p.Reason, sourceOrDefault(p.Source),
-			p.ProposedAction.Irreversible(), evidence, now, pending < s.maxPending)
+			p.ProposedAction.Irreversible(), evidence, now, pending < s.maxPending, p.count())
 		if a, err = scanAction(row); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return ErrStoreFull // 上限に達していて、既存の承認待ちの更新でもない

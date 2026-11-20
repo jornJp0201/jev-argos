@@ -65,18 +65,45 @@ func OpenSQLite(ctx context.Context, path string) (*SQLiteStore, error) {
 	return &SQLiteStore{db: db}, nil
 }
 
+var _ BatchStore = (*SQLiteStore)(nil)
+
 func (s *SQLiteStore) Close() error { return s.db.Close() }
 
 func (s *SQLiteStore) SaveDecision(ctx context.Context, log DecisionLog) error {
+	return insertSQLite(ctx, s.db, log)
+}
+
+// SaveDecisions は判定ログを 1 つのトランザクションでまとめて保存する。
+func (s *SQLiteStore) SaveDecisions(ctx context.Context, logs []DecisionLog) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("sqlite begin: %w", err)
+	}
+	defer tx.Rollback()
+	for _, log := range logs {
+		if err := insertSQLite(ctx, tx, log); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("sqlite commit (%d rows): %w", len(logs), err)
+	}
+	return nil
+}
+
+func insertSQLite(ctx context.Context, db interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}, log DecisionLog) error {
 	var ts any
 	if log.SignalTimestamp != nil {
 		ts = log.SignalTimestamp.UTC().Format(time.RFC3339Nano)
 	}
-	_, err := s.db.ExecContext(ctx, `
+	_, err := db.ExecContext(ctx, `
 		INSERT OR IGNORE INTO jev_decision_logs
-		    (signal_id, signal_timestamp, client_ip, user_id, risk_score, confidence, level, downgraded, raw_signal_json)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		log.SignalID, ts, log.ClientIP, log.UserID, log.RiskScore, log.Confidence, int(log.Level), log.Downgraded, string(log.RawSignalJSON))
+		    (signal_id, signal_timestamp, client_ip, user_id, risk_score, confidence, level, downgraded, raw_signal_json, received_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		log.SignalID, ts, log.ClientIP, log.UserID, log.RiskScore, log.Confidence, int(log.Level), log.Downgraded, string(log.RawSignalJSON),
+		log.receivedAt().UTC().Format("2006-01-02T15:04:05.000Z")) // スキーマの既定値 (strftime) と同じ形式
 	if err != nil {
 		return fmt.Errorf("sqlite insert (signal_id=%q): %w", log.SignalID, err)
 	}

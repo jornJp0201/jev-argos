@@ -141,7 +141,11 @@ type Proposal struct {
 	Reason         string
 	Source         string // 空なら SourceJev
 	Evidence       Evidence
+	// Count はこの提案がまとめている判定の数 (0 なら 1)。ProposeEmitter が同じ対象への提案をまとめたときに使う。
+	Count int
 }
+
+func (p Proposal) count() int { return max(1, p.Count) }
 
 var (
 	ErrNotFound       = errors.New("action not found")
@@ -210,7 +214,7 @@ func (s *MemoryStore) Propose(_ context.Context, p Proposal) (Action, error) {
 		a.SignalID = p.SignalID
 		a.Reason = p.Reason
 		a.Evidence = p.Evidence
-		a.EventCount++
+		a.EventCount += p.count()
 		a.UpdatedAt = now
 		s.notify(*a)
 		return *a, nil
@@ -233,7 +237,7 @@ func (s *MemoryStore) Propose(_ context.Context, p Proposal) (Action, error) {
 		Irreversible:   p.ProposedAction.Irreversible(),
 		Status:         StatusPending,
 		Evidence:       p.Evidence,
-		EventCount:     1,
+		EventCount:     p.count(),
 		CreatedAt:      now,
 		UpdatedAt:      now,
 	}
@@ -385,32 +389,124 @@ func newID() (string, error) {
 	return "act_" + hex.EncodeToString(b), nil
 }
 
+const (
+	// DefaultProposeWindow は ProposeEmitter が同じ対象への提案をまとめる既定の間隔。
+	DefaultProposeWindow = 2 * time.Second
+	// DefaultMaxCoalescedTargets は ProposeEmitter がまとめる対象の数の既定の上限。
+	DefaultMaxCoalescedTargets = 10000
+)
+
 // ProposeEmitter は Level 3 の判定から IP 一時遮断の承認待ちアクションを提案する receiver.Emitter。
 // Level 4 は自動遮断の対象、Level 2 以下は遮断を提案するほどの根拠が無いため対象外。
+//
+// 攻撃中は同じ送信元の判定が連続して Level 3 になるため、1 件ごとに Store へ書くと、攻撃を受けるほど DB が重くなる。
+// Window を指定すると、対象ごとに最初の提案だけをすぐに書き (管理者がすぐに気付けるように)、
+// その後に続いた提案はメモリ上でまとめて Window ごとに 1 回だけ書く (件数は合算し、根拠は最新のものを使う)。
+// Window を指定した場合は Start を呼び、停止時は判定の処理を止めた後に Flush を呼ぶこと。
 type ProposeEmitter struct {
 	Store  Store
 	Logger *slog.Logger // nil なら slog.Default()
+	// Window は同じ対象への提案をまとめる間隔。0 ならまとめずに 1 件ずつ書く。
+	Window time.Duration
+	// MaxTargets はまとめる対象の数の上限 (既定 DefaultMaxCoalescedTargets)。超えた対象はまとめずにすぐ書く。
+	MaxTargets int
+
+	mu      sync.Mutex
+	written map[string]struct{}  // 今の Window で既に書いた対象
+	pending map[string]*Proposal // 今の Window でまとめている提案
 }
 
-var _ receiver.Emitter = ProposeEmitter{}
+var _ receiver.Emitter = (*ProposeEmitter)(nil)
 
-func (em ProposeEmitter) Emit(ctx context.Context, e receiver.Event) {
+func (em *ProposeEmitter) Emit(ctx context.Context, e receiver.Event) {
 	if e.Decision.Level != guardrail.Level3 {
 		return
 	}
-	_, err := em.Store.Propose(ctx, Proposal{
+	p := Proposal{
 		SignalID:       e.Signal.GetSignalId(),
 		ProposedAction: ActionBlockIP,
 		Target:         e.Signal.GetUserContext().GetClientIp(),
 		Reason:         reason(e),
 		Evidence:       EvidenceFromEvent(e),
-	})
-	if err != nil {
+	}
+	if em.Window > 0 && em.coalesce(p) {
+		return
+	}
+	em.propose(ctx, p)
+}
+
+// coalesce は p を今の Window の提案にまとめられたら true を返す。
+// その対象への今の Window で最初の提案なら、すぐに書くよう false を返す。
+func (em *ProposeEmitter) coalesce(p Proposal) bool {
+	key := pendingKey(p.ProposedAction, p.Target)
+	em.mu.Lock()
+	defer em.mu.Unlock()
+	if em.written == nil {
+		em.written = make(map[string]struct{})
+		em.pending = make(map[string]*Proposal)
+	}
+	if _, ok := em.written[key]; !ok {
+		limit := em.MaxTargets
+		if limit <= 0 {
+			limit = DefaultMaxCoalescedTargets
+		}
+		if len(em.written) < limit {
+			em.written[key] = struct{}{}
+		}
+		return false
+	}
+	if q, ok := em.pending[key]; ok {
+		count := q.count() + 1
+		*q = p
+		q.Count = count
+	} else {
+		em.pending[key] = &p
+	}
+	return true
+}
+
+// Flush はまとめている提案を Store に書く。
+// 書いた対象は次の Window でもまとめ、提案が途絶えた対象は次の提案をすぐに書く。
+func (em *ProposeEmitter) Flush(ctx context.Context) {
+	em.mu.Lock()
+	pending := em.pending
+	em.pending = make(map[string]*Proposal, len(pending))
+	em.written = make(map[string]struct{}, len(pending))
+	for key := range pending {
+		em.written[key] = struct{}{}
+	}
+	em.mu.Unlock()
+	for _, p := range pending {
+		em.propose(ctx, *p)
+	}
+}
+
+// Start は Window ごとに Flush を実行する goroutine を起動する。ctx がキャンセルされると停止する。
+func (em *ProposeEmitter) Start(ctx context.Context) {
+	if em.Window <= 0 {
+		return
+	}
+	ticker := time.NewTicker(em.Window)
+	go func() {
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				em.Flush(ctx)
+			}
+		}
+	}()
+}
+
+func (em *ProposeEmitter) propose(ctx context.Context, p Proposal) {
+	if _, err := em.Store.Propose(ctx, p); err != nil {
 		logger := em.Logger
 		if logger == nil {
 			logger = slog.Default()
 		}
-		logger.Error("propose action failed", "signal_id", e.Signal.GetSignalId(), "err", err)
+		logger.Error("propose action failed", "signal_id", p.SignalID, "count", p.count(), "err", err)
 	}
 }
 

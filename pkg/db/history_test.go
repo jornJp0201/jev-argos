@@ -123,6 +123,13 @@ func TestPostgresHistory_Integration(t *testing.T) {
 	}{store, PostgresHistory{Pool: pool}}
 	runHistoryContract(t, pg)
 
+	t.Run("Batched", func(t *testing.T) { // まとめて保存 (unnest の 1 回の INSERT) でも同じ振る舞い
+		pool.Exec(ctx, "TRUNCATE jev_decision_logs")
+		w := NewBatchWriter(store, store, BatchOptions{FlushInterval: time.Hour, Logger: quiet})
+		defer w.Close()
+		runHistoryContract(t, batched{w, PostgresHistory{Pool: pool}})
+	})
+
 	var summary string
 	pool.QueryRow(ctx, `SELECT llm_analysis->>'summary' FROM jev_decision_logs WHERE signal_id = 'sig-h2'`).Scan(&summary)
 	if summary != "probing" {

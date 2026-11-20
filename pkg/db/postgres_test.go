@@ -113,7 +113,7 @@ func TestPersistDecision_SavesLevel2To4(t *testing.T) {
 			e := event("sig-1", level)
 			ts := time.Date(2026, 10, 29, 12, 34, 56, 789_000_000, time.UTC)
 			mock.ExpectExec(insertSQL).
-				WithArgs("sig-1", &ts, "203.0.113.9", "user-42", 3.8, 0.7, int16(level), level == guardrail.Level3, pgxmock.AnyArg()).
+				WithArgs("sig-1", &ts, "203.0.113.9", "user-42", 3.8, 0.7, int16(level), level == guardrail.Level3, pgxmock.AnyArg(), pgxmock.AnyArg()).
 				WillReturnResult(pgxmock.NewResult("INSERT", 1))
 
 			if err := PersistDecision(context.Background(), NewPostgresStore(mock), e); err != nil {
@@ -135,7 +135,7 @@ func TestSaveDecision_ReturnsDBError(t *testing.T) {
 	mock := newMock(t)
 	dbErr := errors.New("connection reset")
 	mock.ExpectExec(insertSQL).WithArgs(pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(),
-		pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
+		pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg(), pgxmock.AnyArg()).
 		WillReturnError(dbErr)
 
 	err := PersistDecision(context.Background(), NewPostgresStore(mock), event("sig-1", guardrail.Level4))

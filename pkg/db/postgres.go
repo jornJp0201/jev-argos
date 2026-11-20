@@ -71,8 +71,16 @@ FROM jev_decision_logs;
 
 const insertSQL = `
 INSERT INTO jev_decision_logs
-    (signal_id, signal_timestamp, client_ip, user_id, risk_score, confidence, level, downgraded, raw_signal_json)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+    (signal_id, signal_timestamp, client_ip, user_id, risk_score, confidence, level, downgraded, raw_signal_json, received_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+ON CONFLICT (signal_id) WHERE signal_id <> '' DO NOTHING`
+
+// insertBatchSQL は判定ログを 1 回の SQL でまとめて保存する (列ごとの配列を unnest で行に戻す)。
+// COPY は ON CONFLICT (再送の重複を無視する) を使えないため、INSERT ... SELECT にしている。
+const insertBatchSQL = `
+INSERT INTO jev_decision_logs
+    (signal_id, signal_timestamp, client_ip, user_id, risk_score, confidence, level, downgraded, raw_signal_json, received_at)
+SELECT * FROM unnest($1::text[], $2::timestamptz[], $3::text[], $4::text[], $5::float8[], $6::float8[], $7::int2[], $8::bool[], $9::jsonb[], $10::timestamptz[])
 ON CONFLICT (signal_id) WHERE signal_id <> '' DO NOTHING`
 
 // DecisionLog は jev_decision_logs の 1 行。
@@ -86,6 +94,16 @@ type DecisionLog struct {
 	Level           guardrail.Level
 	Downgraded      bool
 	RawSignalJSON   []byte
+	// ReceivedAt はサーバーが判定した時刻 (ゼロなら保存した時刻)。
+	// まとめて保存すると保存の時刻が同じになるため、受け取った順序を保つよう判定時に記録する。
+	ReceivedAt time.Time
+}
+
+func (l DecisionLog) receivedAt() time.Time {
+	if l.ReceivedAt.IsZero() {
+		return time.Now()
+	}
+	return l.ReceivedAt
 }
 
 // NewDecisionLog は判定結果から DecisionLog を組み立てる。
@@ -103,6 +121,7 @@ func NewDecisionLog(e receiver.Event) (DecisionLog, error) {
 		Level:         e.Decision.Level,
 		Downgraded:    e.Decision.Downgraded,
 		RawSignalJSON: raw,
+		ReceivedAt:    time.Now(),
 	}
 	if ts, ok := parseTimestamp(e.Signal); ok {
 		log.SignalTimestamp = &ts
@@ -155,7 +174,7 @@ type PostgresStore struct {
 	db Execer
 }
 
-var _ DecisionStore = (*PostgresStore)(nil)
+var _ BatchStore = (*PostgresStore)(nil)
 
 // NewPostgresStore は db を使う PostgresStore を返す。
 func NewPostgresStore(db Execer) *PostgresStore {
@@ -186,10 +205,42 @@ func (s *PostgresStore) SaveAnalysis(ctx context.Context, signalID string, a app
 func (s *PostgresStore) SaveDecision(ctx context.Context, log DecisionLog) error {
 	_, err := s.db.Exec(ctx, insertSQL,
 		log.SignalID, log.SignalTimestamp, log.ClientIP, log.UserID,
-		log.RiskScore, log.Confidence, int16(log.Level), log.Downgraded, log.RawSignalJSON,
+		log.RiskScore, log.Confidence, int16(log.Level), log.Downgraded, log.RawSignalJSON, log.receivedAt(),
 	)
 	if err != nil {
 		return fmt.Errorf("insert jev_decision_logs (signal_id=%q): %w", log.SignalID, err)
+	}
+	return nil
+}
+
+// SaveDecisions は判定ログを 1 回の SQL でまとめて保存する。同じ signal_id が既にあれば、その行は何もしない。
+func (s *PostgresStore) SaveDecisions(ctx context.Context, logs []DecisionLog) error {
+	if len(logs) == 0 {
+		return nil
+	}
+	var (
+		ids, ips, users, raws []string
+		timestamps, received  []*time.Time
+		scores, confidences   []float64
+		levels                []int16
+		downgraded            []bool
+	)
+	for _, l := range logs {
+		ids = append(ids, l.SignalID)
+		timestamps = append(timestamps, l.SignalTimestamp)
+		ips = append(ips, l.ClientIP)
+		users = append(users, l.UserID)
+		scores = append(scores, l.RiskScore)
+		confidences = append(confidences, l.Confidence)
+		levels = append(levels, int16(l.Level))
+		downgraded = append(downgraded, l.Downgraded)
+		raws = append(raws, string(l.RawSignalJSON))
+		at := l.receivedAt()
+		received = append(received, &at)
+	}
+	_, err := s.db.Exec(ctx, insertBatchSQL, ids, timestamps, ips, users, scores, confidences, levels, downgraded, raws, received)
+	if err != nil {
+		return fmt.Errorf("insert jev_decision_logs (%d rows): %w", len(logs), err)
 	}
 	return nil
 }

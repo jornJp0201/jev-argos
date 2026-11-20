@@ -4,6 +4,9 @@
 // 同期的に判定し (数マイクロ秒〜数ミリ秒)、結果のレベルを ReportResponse で即時に返す。
 // Level 2 以上の後続処理 (LLM 分析・通知・遮断) は時間がかかるため、
 // キュー経由でワーカーに渡し、RPC の応答を待たせない。
+//
+// キューは後続処理ごとに分けられる (Options.Lanes)。1 つのキューに並べると、Slack 通知のような遅い処理で
+// キューが詰まったときに、Level 4 の自動遮断まで捨てられてしまう (攻撃が激しいほど遮断できない)。
 package receiver
 
 import (
@@ -13,6 +16,7 @@ import (
 	"log/slog"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -51,11 +55,25 @@ func (es Emitters) Emit(ctx context.Context, e Event) {
 	}
 }
 
+// Lane は 1 つの後続処理専用のキューとワーカー。
+// 他の Lane の処理が遅れて詰まっても、この Lane のイベントは捨てられず、処理も待たされない。
+type Lane struct {
+	Name     string // ログに出す名前 (例: "block")
+	Emitter  Emitter
+	MinLevel guardrail.Level // この Level 以上のイベントだけをキューに積む (0 ならすべて)
+	// [差し替えポイント] 処理の速さに合わせて調整する。遅い処理 (外部への通知等) はワーカーを増やす。
+	QueueSize int // キュー長。満杯時はイベントを捨てる (0 なら 1024)
+	Workers   int // ワーカー数 (0 なら 1)
+}
+
 // Options は Server の設定。
 type Options struct {
-	QueueSize int // Emitter へのキュー長。満杯時はイベントを捨てる (既定 1024)
-	Workers   int // Emitter を呼ぶワーカー数 (既定 4)
-	Logger    *slog.Logger
+	QueueSize int // NewServer に渡した Emitter へのキュー長。満杯時はイベントを捨てる (既定 1024)
+	Workers   int // NewServer に渡した Emitter を呼ぶワーカー数 (既定 4)
+	// Lanes は後続処理ごとの専用のキュー。NewServer に渡した Emitter (nil 可) とは別に、それぞれ並行して処理される。
+	// 先に書いた Lane から順にキューに積む。
+	Lanes  []Lane
+	Logger *slog.Logger
 	// Observer は Level 1 を含むすべての判定で同期的に呼ばれる (例: ダッシュボードへの配信)。
 	// 判定の応答を遅らせないよう、すぐに戻ること。
 	Observer func(Event)
@@ -71,21 +89,26 @@ type Server struct {
 	buf      buffer.Buffer
 	cls      *classifier.Classifier
 	guard    guardrail.Guardrail
-	emitter  Emitter
 	observer func(Event)
 	logger   *slog.Logger
 
-	mu      sync.RWMutex // closed と events の close を保護する
+	mu      sync.RWMutex // closed と各 lane の events の close を保護する
 	closed  bool
-	events  chan Event
+	lanes   []*lane
 	workers sync.WaitGroup
-	dropped atomic.Uint64
+}
+
+type lane struct {
+	Lane
+	events   chan Event
+	dropped  atomic.Uint64
+	lastWarn atomic.Int64 // 最後に「捨てた」と警告した時刻 (UnixNano)
 }
 
 var _ jevargosv1.SignalServiceServer = (*Server)(nil)
 
-// NewServer は Server を作成し、Emitter のワーカーを起動する。
-// 使い終わったら Close を呼ぶこと。
+// NewServer は Server を作成し、Emitter と opts.Lanes のワーカーを起動する。
+// emitter が nil なら opts.Lanes だけを使う。使い終わったら Close を呼ぶこと。
 func NewServer(buf buffer.Buffer, cls *classifier.Classifier, emitter Emitter, opts Options) *Server {
 	if opts.QueueSize <= 0 {
 		opts.QueueSize = 1024
@@ -104,14 +127,26 @@ func NewServer(buf buffer.Buffer, cls *classifier.Classifier, emitter Emitter, o
 		buf:      buf,
 		cls:      cls,
 		guard:    guard,
-		emitter:  emitter,
 		observer: opts.Observer,
 		logger:   opts.Logger,
-		events:   make(chan Event, opts.QueueSize),
 	}
-	for range opts.Workers {
-		s.workers.Add(1)
-		go s.work()
+	lanes := opts.Lanes
+	if emitter != nil {
+		lanes = append([]Lane{{Name: "default", Emitter: emitter, QueueSize: opts.QueueSize, Workers: opts.Workers}}, lanes...)
+	}
+	for _, cfg := range lanes {
+		if cfg.QueueSize <= 0 {
+			cfg.QueueSize = 1024
+		}
+		if cfg.Workers <= 0 {
+			cfg.Workers = 1
+		}
+		l := &lane{Lane: cfg, events: make(chan Event, cfg.QueueSize)}
+		s.lanes = append(s.lanes, l)
+		for range cfg.Workers {
+			s.workers.Add(1)
+			go s.work(l)
+		}
 	}
 	return s
 }
@@ -183,9 +218,22 @@ func (s *Server) Evaluate(ctx context.Context, signal *jevargosv1.SecuritySignal
 	return e, nil
 }
 
-// Dropped はキュー満杯または Close 後のために Emitter に渡せなかったイベント数を返す。
+// Dropped はキュー満杯または Close 後のために Emitter に渡せなかったイベント数を返す (全 Lane の合計)。
 func (s *Server) Dropped() uint64 {
-	return s.dropped.Load()
+	var n uint64
+	for _, l := range s.lanes {
+		n += l.dropped.Load()
+	}
+	return n
+}
+
+// DroppedByLane は Lane の名前ごとの、捨てたイベント数を返す。
+func (s *Server) DroppedByLane() map[string]uint64 {
+	m := make(map[string]uint64, len(s.lanes))
+	for _, l := range s.lanes {
+		m[l.Name] += l.dropped.Load()
+	}
+	return m
 }
 
 // Close は新しいイベントの受付を止め、キューに残ったイベントを処理し終えるまで待つ。
@@ -194,42 +242,60 @@ func (s *Server) Close() {
 	s.mu.Lock()
 	if !s.closed {
 		s.closed = true
-		close(s.events)
+		for _, l := range s.lanes {
+			close(l.events)
+		}
 	}
 	s.mu.Unlock()
 	s.workers.Wait()
 }
 
+// dispatch はイベントを各 Lane のキューに積む。どの Lane も待たない (満杯の Lane の分だけ捨てる)。
 func (s *Server) dispatch(e Event) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	if s.closed {
-		s.dropped.Add(1)
+	for _, l := range s.lanes {
+		if e.Decision.Level < l.MinLevel {
+			continue
+		}
+		if s.closed {
+			l.dropped.Add(1)
+			continue
+		}
+		select {
+		case l.events <- e:
+		default:
+			// 後続処理が詰まっても判定と応答は止めない。
+			l.dropped.Add(1)
+			s.warnDropped(l)
+		}
+	}
+}
+
+// warnDropped は捨てたことを Lane ごとに 1 秒に 1 回まで警告する (攻撃中にログがあふれないように)。
+func (s *Server) warnDropped(l *lane) {
+	now := time.Now().UnixNano()
+	last := l.lastWarn.Load()
+	if now-last < int64(time.Second) || !l.lastWarn.CompareAndSwap(last, now) {
 		return
 	}
-	select {
-	case s.events <- e:
-	default:
-		// 後続処理が詰まっても判定と応答は止めない。
-		s.dropped.Add(1)
-		s.logger.Warn("emitter queue full, event dropped", "signal_id", e.Signal.GetSignalId())
-	}
+	s.logger.Warn("emitter queue full, events dropped", "lane", l.Name, "dropped_total", l.dropped.Load())
 }
 
-func (s *Server) work() {
+func (s *Server) work(l *lane) {
 	defer s.workers.Done()
-	for e := range s.events {
-		s.emit(e)
+	for e := range l.events {
+		s.emit(l, e)
 	}
 }
 
-func (s *Server) emit(e Event) {
+func (s *Server) emit(l *lane, e Event) {
 	defer func() {
 		if r := recover(); r != nil {
-			s.logger.Error("emitter panicked", "signal_id", e.Signal.GetSignalId(), "panic", r)
+			s.logger.Error("emitter panicked", "lane", l.Name, "signal_id", e.Signal.GetSignalId(), "panic", r)
 		}
 	}()
-	s.emitter.Emit(context.Background(), e)
+	l.Emitter.Emit(context.Background(), e)
 }
 
 // LogEmitter はイベントをログに出力するだけの Emitter。
