@@ -26,6 +26,7 @@ import (
 	"github.com/jornJp0201/jev-argos/pkg/approval"
 	"github.com/jornJp0201/jev-argos/pkg/buffer"
 	"github.com/jornJp0201/jev-argos/pkg/db"
+	"github.com/jornJp0201/jev-argos/pkg/guardrail"
 	"github.com/jornJp0201/jev-argos/pkg/llm"
 	"github.com/jornJp0201/jev-argos/pkg/notify"
 	"github.com/jornJp0201/jev-argos/pkg/receiver"
@@ -127,26 +128,36 @@ func newExecutor(cfg config, blocklist action.Blocklist) approval.Executor {
 	}
 }
 
-// newEmitters は Level 2 以上のイベントの後続処理を組み立てる (receiver のワーカーで順に実行される)。
+// newLanes は Level 2 以上のイベントの後続処理を組み立てる。
+// 後続処理ごとに専用のキューとワーカーを持つため、どれかが遅れても (例: Slack の応答が遅い) 他は止まらない。
 //
-// [差し替えポイント] 判定後の処理を追加・削除する場合はここを変える (receiver.Emitter を実装して足す)。
-func newEmitters(cfg config, stores decisionStores, actions approval.Store, blocklist action.Blocklist, llmEmitter *llm.Emitter, logger *slog.Logger) receiver.Emitters {
-	emitters := receiver.Emitters{
-		receiver.LogEmitter{Logger: logger},
-		action.AutoBlockEmitter{Blocklist: blocklist, TTL: cfg.blockTTL, Logger: logger}, // Level 4 → 自動遮断
-		approval.ProposeEmitter{Store: actions, Logger: logger},                          // Level 3 → 承認キュー
+// [差し替えポイント] 判定後の処理を追加・削除する場合はここを変える (receiver.Emitter を実装して Lane を足す)。
+func newLanes(cfg config, stores decisionStores, proposer *approval.ProposeEmitter, blocklist action.Blocklist, llmEmitter *llm.Emitter, logger *slog.Logger) []receiver.Lane {
+	lanes := []receiver.Lane{
+		// Level 4 → 自動遮断。Level 4 だけが入るため、Level 2・3 がどれだけ来ても埋まらない
+		{Name: "block", Emitter: action.AutoBlockEmitter{Blocklist: blocklist, TTL: cfg.blockTTL, Logger: logger}, MinLevel: guardrail.Level4, Workers: 2},
+		// Level 3 → 承認キュー (同じ送信元の提案はまとめて書く)
+		{Name: "approval", Emitter: proposer, MinLevel: guardrail.Level3},
+		{Name: "log", Emitter: receiver.LogEmitter{Logger: logger}, MinLevel: guardrail.Level2},
 	}
+	// Level 2〜4 → 判定ログと LLM 分析。分析は判定ログの行を更新するため、同じ Lane で判定ログを先に渡す
+	// (どちらもキューに積むだけなので、この Lane は遅くならない)
+	var persist receiver.Emitters
 	if stores.decisions != nil {
-		emitters = append(emitters, db.Emitter{Store: stores.decisions, Logger: logger}) // Level 2〜4 → 判定ログ
-	}
-	if ns := newNotifiers(cfg); len(ns) > 0 {
-		emitters = append(emitters, &notify.Emitter{Notifiers: ns, DashboardURL: cfg.dashboardURL, Logger: logger}) // Level 3〜4 → 通知
-		logger.Info("alert notifications enabled", "notifiers", len(ns))
+		persist = append(persist, db.Emitter{Store: stores.decisions, Logger: logger})
 	}
 	if llmEmitter != nil {
-		emitters = append(emitters, llmEmitter) // Level 2〜4 → LLM 分析 (専用のキューで非同期)
+		persist = append(persist, llmEmitter) // 専用のキューで非同期に分析する
 	}
-	return emitters
+	if len(persist) > 0 {
+		lanes = append(lanes, receiver.Lane{Name: "persist", Emitter: persist, MinLevel: guardrail.Level2})
+	}
+	if ns := newNotifiers(cfg); len(ns) > 0 {
+		// Level 3〜4 → 通知。外部への HTTP 呼び出しで遅いため、ワーカーを多めにする
+		lanes = append(lanes, receiver.Lane{Name: "notify", Emitter: &notify.Emitter{Notifiers: ns, DashboardURL: cfg.dashboardURL, Logger: logger}, MinLevel: guardrail.Level3, Workers: 4})
+		logger.Info("alert notifications enabled", "notifiers", len(ns))
+	}
+	return lanes
 }
 
 // startAPI は管理 HTTP API を起動し、停止用の関数を返す。
@@ -200,6 +211,15 @@ type decisionStores struct {
 // LLM の履歴は Safe View から読み、JEV_ARGOS_LLM_HISTORY_URL があればそのリードレプリカを使う (設計書 6.1)。
 func newDecisionStores(ctx context.Context, cfg config, pool *pgxpool.Pool, logger *slog.Logger) (decisionStores, error) {
 	var s decisionStores
+	// 判定ログはまとめて保存する (攻撃中も DB への書き込みの回数が判定の件数に比例しないように)
+	batch := func(store interface {
+		db.BatchStore
+		db.AnalysisStore
+	}) {
+		w := db.NewBatchWriter(store, store, db.BatchOptions{Logger: logger})
+		s.decisions, s.analyses = w, w
+		s.closers = append(s.closers, w.Close) // 保存先を閉じる前に、残りを保存する
+	}
 	switch {
 	case pool != nil:
 		store := db.NewPostgresStore(pool)
@@ -209,14 +229,16 @@ func newDecisionStores(ctx context.Context, cfg config, pool *pgxpool.Pool, logg
 			return s, err
 		}
 		logger.Info("persisting decisions to postgres", "host", pool.Config().ConnConfig.Host)
-		s.decisions, s.analyses, s.history = store, store, db.PostgresHistory{Pool: pool}
+		batch(store)
+		s.history = db.PostgresHistory{Pool: pool}
 	case cfg.sqlitePath != "":
 		store, err := db.OpenSQLite(ctx, cfg.sqlitePath)
 		if err != nil {
 			return s, err
 		}
 		logger.Info("persisting decisions to sqlite", "path", cfg.sqlitePath)
-		s.decisions, s.analyses, s.history = store, store, store
+		batch(store)
+		s.history = store
 		s.closers = append(s.closers, func() { store.Close() })
 	default:
 		logger.Info("decision logs are not persisted (set JEV_ARGOS_POSTGRES_URL or JEV_ARGOS_SQLITE_PATH)")
