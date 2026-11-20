@@ -230,3 +230,70 @@ func ids(as []Action) []string {
 	}
 	return out
 }
+
+// 攻撃中に同じ送信元から Level 3 が続いても、最初の 1 件だけをすぐに書き、残りは Window ごとにまとめて書く。
+func TestProposeEmitter_Coalesces(t *testing.T) {
+	s, _ := newTestStore(DefaultMaxActions)
+	em := &ProposeEmitter{Store: s, Window: time.Hour} // Flush は手動で呼ぶ
+	eventWithID := func(id string) receiver.Event {
+		e := event(guardrail.Level3, true)
+		e.Signal.SignalId = id
+		return e
+	}
+	pending := func() Action {
+		t.Helper()
+		all, _ := s.List(ctx, StatusPending)
+		if len(all) != 1 {
+			t.Fatalf("pending = %d, want 1", len(all))
+		}
+		return all[0]
+	}
+
+	em.Emit(ctx, eventWithID("s1"))
+	if a := pending(); a.EventCount != 1 || a.SignalID != "s1" {
+		t.Fatalf("first proposal must be written immediately: %+v", a)
+	}
+	for _, id := range []string{"s2", "s3", "s4", "s5"} {
+		em.Emit(ctx, eventWithID(id))
+	}
+	if a := pending(); a.EventCount != 1 {
+		t.Fatalf("following proposals must be coalesced until flush: count = %d", a.EventCount)
+	}
+	em.Flush(ctx)
+	if a := pending(); a.EventCount != 5 || a.SignalID != "s5" {
+		t.Fatalf("after flush = count %d, signal %q; want 5 with the latest evidence", a.EventCount, a.SignalID)
+	}
+
+	// 攻撃が続いている対象は、次の Window でもまとめる
+	em.Emit(ctx, eventWithID("s6"))
+	if a := pending(); a.EventCount != 5 {
+		t.Fatalf("ongoing target must stay coalesced: count = %d", a.EventCount)
+	}
+	em.Flush(ctx)
+	em.Flush(ctx) // 何もまとめていない Window: 対象をまとめる状態から外す
+	em.Emit(ctx, eventWithID("s7"))
+	if a := pending(); a.EventCount != 7 || a.SignalID != "s7" {
+		t.Errorf("quiet target must be written immediately again: count %d, signal %q", a.EventCount, a.SignalID)
+	}
+}
+
+// まとめる対象の数が上限に達したら、新しい対象はまとめずにすぐ書く (メモリを守るため)。
+func TestProposeEmitter_MaxTargets(t *testing.T) {
+	s, _ := newTestStore(DefaultMaxActions)
+	em := &ProposeEmitter{Store: s, Window: time.Hour, MaxTargets: 1}
+	other := event(guardrail.Level3, true)
+	other.Signal.UserContext.ClientIp = "198.51.100.1"
+
+	em.Emit(ctx, event(guardrail.Level3, true))
+	em.Emit(ctx, other)
+	em.Emit(ctx, other)
+	all, _ := s.List(ctx, StatusPending)
+	for _, a := range all {
+		if a.Target == "198.51.100.1" && a.EventCount != 2 {
+			t.Errorf("target over the limit = count %d, want 2 (written one by one)", a.EventCount)
+		}
+	}
+	if len(all) != 2 {
+		t.Errorf("pending = %d, want 2", len(all))
+	}
+}
