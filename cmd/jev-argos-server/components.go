@@ -22,14 +22,11 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/jornJp0201/jev-argos/pkg/action"
-	"github.com/jornJp0201/jev-argos/pkg/api"
 	"github.com/jornJp0201/jev-argos/pkg/approval"
 	"github.com/jornJp0201/jev-argos/pkg/buffer"
 	"github.com/jornJp0201/jev-argos/pkg/db"
-	"github.com/jornJp0201/jev-argos/pkg/guardrail"
 	"github.com/jornJp0201/jev-argos/pkg/llm"
 	"github.com/jornJp0201/jev-argos/pkg/notify"
-	"github.com/jornJp0201/jev-argos/pkg/receiver"
 )
 
 const cleanupInterval = 30 * time.Second
@@ -128,50 +125,18 @@ func newExecutor(cfg config, blocklist action.Blocklist) approval.Executor {
 	}
 }
 
-// newLanes は Level 2 以上のイベントの後続処理を組み立てる。
-// 後続処理ごとに専用のキューとワーカーを持つため、どれかが遅れても (例: Slack の応答が遅い) 他は止まらない。
-//
-// [差し替えポイント] 判定後の処理を追加・削除する場合はここを変える (receiver.Emitter を実装して Lane を足す)。
-func newLanes(cfg config, stores decisionStores, proposer *approval.ProposeEmitter, blocklist action.Blocklist, llmEmitter *llm.Emitter, logger *slog.Logger) []receiver.Lane {
-	lanes := []receiver.Lane{
-		// Level 4 → 自動遮断。Level 4 だけが入るため、Level 2・3 がどれだけ来ても埋まらない
-		{Name: "block", Emitter: action.AutoBlockEmitter{Blocklist: blocklist, TTL: cfg.blockTTL, Logger: logger}, MinLevel: guardrail.Level4, Workers: 2},
-		// Level 3 → 承認キュー (同じ送信元の提案はまとめて書く)
-		{Name: "approval", Emitter: proposer, MinLevel: guardrail.Level3},
-		{Name: "log", Emitter: receiver.LogEmitter{Logger: logger}, MinLevel: guardrail.Level2},
+// adminToken は管理 API のトークンを返す。未指定なら起動ごとに生成してログに出す。
+func adminToken(cfg config, logger *slog.Logger) string {
+	if cfg.adminToken != "" {
+		return cfg.adminToken
 	}
-	// Level 2〜4 → 判定ログと LLM 分析。分析は判定ログの行を更新するため、同じ Lane で判定ログを先に渡す
-	// (どちらもキューに積むだけなので、この Lane は遅くならない)
-	var persist receiver.Emitters
-	if stores.decisions != nil {
-		persist = append(persist, db.Emitter{Store: stores.decisions, Logger: logger})
-	}
-	if llmEmitter != nil {
-		persist = append(persist, llmEmitter) // 専用のキューで非同期に分析する
-	}
-	if len(persist) > 0 {
-		lanes = append(lanes, receiver.Lane{Name: "persist", Emitter: persist, MinLevel: guardrail.Level2})
-	}
-	if ns := newNotifiers(cfg); len(ns) > 0 {
-		// Level 3〜4 → 通知。外部への HTTP 呼び出しで遅いため、ワーカーを多めにする
-		lanes = append(lanes, receiver.Lane{Name: "notify", Emitter: &notify.Emitter{Notifiers: ns, DashboardURL: cfg.dashboardURL, Logger: logger}, MinLevel: guardrail.Level3, Workers: 4})
-		logger.Info("alert notifications enabled", "notifiers", len(ns))
-	}
-	return lanes
+	token := rand.Text()
+	logger.Warn("admin token not configured; generated a one-time token (set JEV_ARGOS_ADMIN_TOKEN to fix it)", "admin_token", token)
+	return token
 }
 
-// startAPI は管理 HTTP API を起動し、停止用の関数を返す。
-func startAPI(cfg config, apiCfg api.Config, serveErr chan<- error, logger *slog.Logger) (func(), error) {
-	apiCfg.AdminToken = cfg.adminToken
-	if apiCfg.AdminToken == "" {
-		apiCfg.AdminToken = rand.Text()
-		logger.Warn("admin token not configured; generated a one-time token (set JEV_ARGOS_ADMIN_TOKEN to fix it)", "admin_token", apiCfg.AdminToken)
-	}
-	apiCfg.Logger = logger
-	handler, err := api.NewHandler(apiCfg)
-	if err != nil {
-		return nil, err
-	}
+// startAPI は HTTP API を起動し、停止用の関数を返す。
+func startAPI(cfg config, handler http.Handler, serveErr chan<- error, logger *slog.Logger) (func(), error) {
 	lis, err := net.Listen("tcp", cfg.apiAddr)
 	if err != nil {
 		return nil, fmt.Errorf("listen admin api: %w", err)

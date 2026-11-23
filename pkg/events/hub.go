@@ -204,6 +204,13 @@ func (h *Hub) publish(en entry) {
 	h.broadcast(Message{Name: en.name, Data: en.data})
 }
 
+// AddLevel1 は他のプロセスで数えた Level 1 の件数とスコアの合計を、次の集計に加える
+// (判定サーバーを分けて動かす場合に、Redis Streams で届いた集計を足す)。
+func (h *Hub) AddLevel1(count, scoreSum float64) {
+	h.level1Count.Add(int64(math.Round(count * countScale)))
+	h.level1Score.Add(uint64(math.Round(scoreSum * scoreScale)))
+}
+
 // flushSummary はこれまでに数えた Level 1 の件数を、now までの 1 区間の集計として配信する。
 func (h *Hub) flushSummary(now time.Time) {
 	count := h.level1Count.Swap(0)

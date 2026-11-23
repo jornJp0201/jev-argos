@@ -26,28 +26,15 @@ func localAddr(addr string) (string, error) {
 	return net.JoinHostPort(host, port), nil
 }
 
-// checkHealth は同じ設定で起動中のサーバーの gRPC ヘルスと (有効なら) 管理 API の /api/healthz を確認する。
+// checkHealth は同じ設定で起動中のサーバーの gRPC ヘルス (worker 以外) と (有効なら) 管理 API の /api/healthz を確認する。
 func checkHealth(cfg config) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	grpcAddr, err := localAddr(cfg.addr)
-	if err != nil {
-		return fmt.Errorf("grpc addr: %w", err)
-	}
-	conn, err := grpc.NewClient(grpcAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
-	if err != nil {
-		return err
-	}
-	defer conn.Close()
-	resp, err := healthpb.NewHealthClient(conn).Check(ctx, &healthpb.HealthCheckRequest{
-		Service: jevargosv1.SignalService_ServiceDesc.ServiceName,
-	})
-	if err != nil {
-		return fmt.Errorf("grpc %s: %w", grpcAddr, err)
-	}
-	if resp.GetStatus() != healthpb.HealthCheckResponse_SERVING {
-		return fmt.Errorf("grpc %s: %s", grpcAddr, resp.GetStatus())
+	if cfg.role != roleWorker { // worker はシグナルを受信しない (gRPC を提供しない)
+		if err := checkGRPC(ctx, cfg); err != nil {
+			return err
+		}
 	}
 
 	if cfg.apiAddr == "" {
@@ -68,6 +55,29 @@ func checkHealth(cfg config) error {
 	res.Body.Close()
 	if res.StatusCode != http.StatusOK {
 		return fmt.Errorf("api %s: HTTP %d", apiAddr, res.StatusCode)
+	}
+	return nil
+}
+
+// checkGRPC は gRPC のヘルスチェックを行う。
+func checkGRPC(ctx context.Context, cfg config) error {
+	grpcAddr, err := localAddr(cfg.addr)
+	if err != nil {
+		return fmt.Errorf("grpc addr: %w", err)
+	}
+	conn, err := grpc.NewClient(grpcAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	resp, err := healthpb.NewHealthClient(conn).Check(ctx, &healthpb.HealthCheckRequest{
+		Service: jevargosv1.SignalService_ServiceDesc.ServiceName,
+	})
+	if err != nil {
+		return fmt.Errorf("grpc %s: %w", grpcAddr, err)
+	}
+	if resp.GetStatus() != healthpb.HealthCheckResponse_SERVING {
+		return fmt.Errorf("grpc %s: %s", grpcAddr, resp.GetStatus())
 	}
 	return nil
 }

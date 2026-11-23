@@ -17,6 +17,7 @@ type config struct {
 	redisURL    string
 	postgresURL string
 	demo        bool
+	role        string // "all" (既定) | "receiver" | "worker"
 
 	// 遮断 (pkg/action)
 	blockTTL            time.Duration
@@ -113,7 +114,15 @@ func parseConfig() (cfg config, healthcheck bool) {
 	flag.Float64Var(&cfg.blockConfidence, "block-confidence", envFloat("JEV_ARGOS_BLOCK_CONFIDENCE", 0), "confidence C required to auto-block; below this, S in the block range is downgraded to Level 3 (default 0.8)")
 	flag.Float64Var(&cfg.level3Score, "level3-score", envFloat("JEV_ARGOS_LEVEL3_SCORE", 0), "score S to reach Level 3 (default 2.5)")
 	flag.Float64Var(&cfg.level2Score, "level2-score", envFloat("JEV_ARGOS_LEVEL2_SCORE", 0), "score S to reach Level 2 (default 1.5)")
+	flag.StringVar(&cfg.role, "role", envOr("JEV_ARGOS_ROLE", roleAll), "process role: all | receiver (receive and judge) | worker (follow-up processing); receiver / worker require Redis")
 	flag.Parse()
+
+	role, err := parseRole(cfg.role)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
+	cfg.role = role
 
 	// デモは既定で空きポートのローカルのみで受け付ける。アドレスを明示すればそのアドレスで待ち受ける (コンテナ用)
 	_, addrSet := os.LookupEnv("JEV_ARGOS_GRPC_ADDR")

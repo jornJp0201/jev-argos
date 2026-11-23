@@ -15,32 +15,26 @@
 //   - -api-addr (JEV_ARGOS_API_ADDR): 管理 HTTP API (承認待ちアクション) の待受アドレス。空なら無効。
 //   - -admin-token (JEV_ARGOS_ADMIN_TOKEN): 管理 API の Bearer トークン。未指定なら起動ごとに生成してログに出す。
 //   - -demo (JEV_ARGOS_DEMO=true): 起動時に疑似シグナルを流す。
+//
+// 判定と後続処理を別のプロセスに分けることもできる (-role / JEV_ARGOS_ROLE、Redis が必須):
+//   - all (既定): 1 つのプロセスで受信・判定・後続処理をすべて行う
+//   - receiver: シグナルの受信・判定・自動遮断だけを行い、判定結果を Redis Streams に流す。状態を持たないため台数で増やせる
+//   - worker: Redis Streams を読み、承認キュー・判定ログ・LLM 分析・通知・ダッシュボードへの配信を行う
 package main
 
 import (
 	"context"
 	"fmt"
 	"log/slog"
-	"net"
 	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/health"
-	healthpb "google.golang.org/grpc/health/grpc_health_v1"
-
-	jevargosv1 "github.com/jornJp0201/jev-argos/gen/v1"
-	"github.com/jornJp0201/jev-argos/pkg/action"
-	"github.com/jornJp0201/jev-argos/pkg/api"
-	"github.com/jornJp0201/jev-argos/pkg/approval"
-	"github.com/jornJp0201/jev-argos/pkg/classifier"
-	"github.com/jornJp0201/jev-argos/pkg/events"
 	"github.com/jornJp0201/jev-argos/pkg/guardrail"
-	"github.com/jornJp0201/jev-argos/pkg/llm"
 	"github.com/jornJp0201/jev-argos/pkg/receiver"
+	"github.com/jornJp0201/jev-argos/pkg/stream"
 )
 
 func main() {
@@ -66,13 +60,16 @@ func run(cfg config, logger *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// --- 外部サービス (どちらも任意) ---
+	// --- 外部サービス (どちらも任意。役割を分ける場合は Redis が必須) ---
 	rdb, err := connectRedis(ctx, cfg.redisURL)
 	if err != nil {
 		return err
 	}
 	if rdb != nil {
 		defer rdb.Close()
+	}
+	if cfg.role != roleAll && rdb == nil {
+		return fmt.Errorf("JEV_ARGOS_ROLE=%s requires JEV_ARGOS_REDIS_URL (judgments are passed through Redis Streams)", cfg.role)
 	}
 	pool, err := connectPostgres(ctx, cfg.postgresURL)
 	if err != nil {
@@ -81,98 +78,71 @@ func run(cfg config, logger *slog.Logger) error {
 	if pool != nil {
 		defer pool.Close()
 	}
+	logger.Info("starting jev-argos-server", "role", cfg.role)
 
-	// --- 部品の組み立て ---
-	buf, err := newBuffer(ctx, rdb, logger)
-	if err != nil {
-		return err
-	}
 	blocklist := newBlocklist(ctx, rdb, logger)
-	actions, err := newApprovalStore(ctx, pool, logger)
-	if err != nil {
-		return err
-	}
-	stores, err := newDecisionStores(ctx, cfg, pool, logger)
-	if err != nil {
-		return err
-	}
-	defer stores.close()
-	hub := events.NewHub(0, logger) // ダッシュボードへのリアルタイム配信
-	hub.Start(ctx)                  // Level 1 の判定を 1 秒ごとに集計して配信する
+	serveErr := make(chan error, 2)
 
-	var llmEmitter *llm.Emitter
-	provider, err := newLLMProvider(ctx, cfg, logger)
-	if err != nil {
-		return err
+	// --- 後続処理 (承認キュー・判定ログ・LLM・通知) とダッシュボードへの配信: all / worker ---
+	var w *workers
+	if cfg.role != roleReceiver {
+		if w, err = newWorkers(ctx, cfg, pool, logger); err != nil {
+			return err
+		}
+		defer w.stores.close() // 判定ログの残りを保存してから閉じる (pool.Close より先)
 	}
-	if provider != nil {
-		masker, err := newMasker(cfg, provider)
+
+	// --- シグナルの受信と判定: all / receiver ---
+	var sig *signalServer
+	var publisher *stream.Publisher
+	if cfg.role != roleWorker {
+		lanes := receiverLanes(cfg, blocklist, logger)
+		var observer func(receiver.Event)
+		if cfg.role == roleAll {
+			lanes = append(lanes, w.lanes...)
+			observer = w.hub.PublishDecision
+		} else {
+			// 後続処理は worker に任せる: Level 2 以上の判定と Level 1 の件数を Redis Streams に流す
+			publisher = stream.NewPublisher(rdb, stream.PublisherOptions{Logger: logger})
+			lanes = append(lanes, receiver.Lane{Name: "stream", Emitter: publisher, MinLevel: guardrail.Level2})
+			observer = publisher.Observe
+		}
+		buf, err := newBuffer(ctx, rdb, logger)
 		if err != nil {
 			return err
 		}
-		sinks := []llm.Sink{
-			llm.ApprovalSink{Store: actions, Logger: logger},
-			llm.SinkFunc(func(_ context.Context, e receiver.Event, a approval.Analysis) { hub.PublishAnalysis(e, a) }),
+		if sig, err = startSignalServer(cfg, buf, blocklist, lanes, observer, serveErr, logger); err != nil {
+			return err
 		}
-		if stores.analyses != nil {
-			sinks = append(sinks, llm.DBSink{Store: stores.analyses, Logger: logger})
-		}
-		llmEmitter = &llm.Emitter{
-			Analyzer: &llm.Analyzer{Provider: provider, Masker: masker, History: stores.history},
-			Sinks:    sinks,
-			Logger:   logger,
-		}
-		llmEmitter.Start(ctx)
 	}
-	proposer := &approval.ProposeEmitter{Store: actions, Logger: logger, Window: approval.DefaultProposeWindow}
-	proposer.Start(ctx)
-	lanes := newLanes(cfg, stores, proposer, blocklist, llmEmitter, logger)
 
-	// --- gRPC: シグナル受信・遮断リスト配信・ヘルスチェック ---
-	guard := guardrail.New(guardrail.Guardrail{
-		BlockScore:      cfg.blockScore,
-		BlockConfidence: cfg.blockConfidence,
-		Level3Score:     cfg.level3Score,
-		Level2Score:     cfg.level2Score,
-	})
-	srv := receiver.NewServer(buf, classifier.NewDefault(), nil, receiver.Options{Lanes: lanes, Logger: logger, Observer: hub.PublishDecision, Guardrail: &guard})
-	gs := grpc.NewServer()
-	jevargosv1.RegisterSignalServiceServer(gs, srv)
-	jevargosv1.RegisterControlServiceServer(gs, &action.ControlServer{Blocklist: blocklist})
-	// 標準の gRPC Health Checking Protocol (Kubernetes の grpc プローブ・grpc_health_probe 用)
-	hs := health.NewServer()
-	healthpb.RegisterHealthServer(gs, hs)
-	hs.SetServingStatus(jevargosv1.SignalService_ServiceDesc.ServiceName, healthpb.HealthCheckResponse_SERVING)
-
-	lis, err := net.Listen("tcp", cfg.addr)
-	if err != nil {
-		return err
+	// --- worker: Redis Streams を後続処理ごとの consumer group で読む ---
+	stopConsumers := func() {}
+	if cfg.role == roleWorker {
+		if stopConsumers, err = startConsumers(ctx, rdb, w, logger); err != nil {
+			return err
+		}
 	}
-	serveErr := make(chan error, 2)
-	go func() { serveErr <- gs.Serve(lis) }()
-	logger.Info("jev-argos-server listening", "addr", lis.Addr().String())
 
 	// --- 管理 HTTP API ---
 	stopAPI := func() {}
 	if cfg.apiAddr != "" {
-		apiCfg := api.Config{
-			Store:     actions,
-			Executor:  newExecutor(cfg, blocklist),
-			Blocklist: blocklist,
-			Routes:    map[string]http.HandlerFunc{"GET /api/events/stream": hub.HandleStream},
+		var handler http.Handler
+		if cfg.role == roleReceiver {
+			handler = ingestOnlyHandler(cfg, sig) // 管理 API とダッシュボードは worker が提供する
+		} else if handler, err = adminHandler(cfg, w, blocklist, sig, logger); err != nil {
+			return err
 		}
-		if cfg.ingestToken != "" {
-			// HTTP でのシグナル受信 (送信専用トークン。管理 API のトークンとは別)
-			apiCfg.PublicRoutes = map[string]http.Handler{"/api/signals": srv.HTTPHandler(cfg.ingestToken), "/api/signals/": srv.HTTPHandler(cfg.ingestToken)}
-		}
-		if stopAPI, err = startAPI(cfg, apiCfg, serveErr, logger); err != nil {
-			gs.Stop()
+		if stopAPI, err = startAPI(cfg, handler, serveErr, logger); err != nil {
+			if sig != nil {
+				sig.gs.Stop()
+			}
 			return err
 		}
 	}
 
-	if cfg.demo {
-		err = runDemo(ctx, lis.Addr().String())
+	if cfg.demo && sig != nil {
+		err = runDemo(ctx, sig.addr)
 	}
 	if err == nil && (!cfg.demo || cfg.apiAddr != "") {
 		if cfg.demo {
@@ -185,18 +155,29 @@ func run(cfg config, logger *slog.Logger) error {
 		}
 	}
 
-	hs.Shutdown() // 停止中は NOT_SERVING を返し、新しいトラフィックを受けないようにする
+	// 停止の順序: 新しい受信を止める → 判定を処理し終える → 後続処理に渡し終える → 後続処理を書き出す
+	if sig != nil {
+		sig.hs.Shutdown() // 停止中は NOT_SERVING を返し、新しいトラフィックを受けないようにする
+	}
 	stopAPI()
-	gs.GracefulStop()
-	srv.Close()
-	// 判定の処理を止めた後に、まとめている提案を書く (判定ログの残りは stores.close で保存する)
-	flushCtx, cancelFlush := context.WithTimeout(context.Background(), 5*time.Second)
-	proposer.Flush(flushCtx)
-	cancelFlush()
-	for name, n := range srv.DroppedByLane() {
-		if n > 0 {
-			logger.Warn("events dropped before reaching emitter", "lane", name, "count", n)
+	if sig != nil {
+		sig.gs.GracefulStop()
+		sig.srv.Close()
+		for name, n := range sig.srv.DroppedByLane() {
+			if n > 0 {
+				logger.Warn("events dropped before reaching emitter", "lane", name, "count", n)
+			}
 		}
+	}
+	if publisher != nil {
+		publisher.Close() // 残りの判定と Level 1 の件数を Redis Streams に追加する
+	}
+	stopConsumers() // 読んだ分を処理し終えるまで待つ
+	if w != nil {
+		// 判定の処理を止めた後に、まとめている提案を書く (判定ログの残りは stores.close で保存する)
+		flushCtx, cancelFlush := context.WithTimeout(context.Background(), 5*time.Second)
+		w.proposer.Flush(flushCtx)
+		cancelFlush()
 	}
 	return err
 }

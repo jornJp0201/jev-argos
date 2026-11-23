@@ -112,6 +112,35 @@ JEV_ARGOS_ADMIN_TOKEN=$(openssl rand -hex 16) \
 go run ./cmd/jev-argos-server
 ```
 
+### 判定と後続処理を分ける (receiver / worker)
+
+`JEV_ARGOS_ROLE` で、1 つのプロセスを受信と判定だけ、または後続処理だけにできる (Redis が必須)。
+判定結果は Redis Streams (`jevargos:events`) で受け渡すため、Kafka などを新しく用意する必要はない。
+
+```
+アダプター --gRPC--> [ receiver × N ] --XADD--> Redis Stream --XREADGROUP--> [ worker × M ] --> DB・通知・LLM・ダッシュボード
+                      受信・判定・自動遮断        jevargos:events       処理ごとの consumer group
+```
+
+| `JEV_ARGOS_ROLE` | 行うこと | 提供するもの |
+| --- | --- | --- |
+| `all` (既定) | すべて (これまでどおり 1 プロセス) | gRPC・管理 API・ダッシュボードへの配信 |
+| `receiver` | シグナルの受信・判定・Level 4 の自動遮断。Level 2 以上の判定と Level 1 の件数を Redis Streams に流す | gRPC (シグナル受信・遮断リストの配信)、HTTP は `/api/healthz` と HTTP でのシグナル受信だけ |
+| `worker` | Redis Streams を読み、承認キュー・判定ログ・LLM 分析・通知を行う | 管理 API・ダッシュボードへの配信 (ダッシュボードはここに向ける) |
+
+```sh
+# 判定サーバー (台数を増やす)
+JEV_ARGOS_ROLE=receiver JEV_ARGOS_REDIS_URL=redis://localhost:6379/0 go run ./cmd/jev-argos-server -addr :50051
+# 後続処理
+JEV_ARGOS_ROLE=worker JEV_ARGOS_REDIS_URL=redis://localhost:6379/0 JEV_ARGOS_POSTGRES_URL=... go run ./cmd/jev-argos-server
+```
+
+- receiver は状態を持たない (統計・遮断リストは Redis、承認キュー・判定ログは worker)。ロードバランサーの後ろで台数を増やせる
+- 自動遮断は最優先のため、worker を待たずに receiver で行う
+- 後続処理ごと (`approval` / `persist` / `notify`) に consumer group を作る。どれかが遅れても他は止まらず、遅れた分は Redis に残って後から処理される
+- worker を増やすと、同じ group の Consumer 同士で判定を分け合う。ダッシュボードへの配信は、worker ごとにすべての判定を受け取る
+- worker が処理の途中で落ちた場合、処理済みにしていない判定は 30 秒後に他の worker (または再起動後の自分) が引き取る
+
 `SIGINT` / `SIGTERM` で停止する。停止時はヘルスチェックを NOT_SERVING にしてから新規の受付を止め、
 処理中の RPC と後続処理のキューを処理し終えてから終了する。
 
@@ -129,6 +158,7 @@ go run ./cmd/jev-argos-server
 | `JEV_ARGOS_ADMIN_TOKEN` | (起動ごとに生成してログに出力) | 管理 API の Bearer トークン。本番では必ず指定する |
 | `JEV_ARGOS_INGEST_TOKEN` | (無効) | HTTP でのシグナル受信 (`POST /api/signals`) の送信専用トークン。管理用とは別にする |
 | `JEV_ARGOS_DEMO` | `false` | `true` で起動時に疑似シグナルを流す |
+| `JEV_ARGOS_ROLE` | `all` | `receiver` (受信と判定だけ) / `worker` (後続処理だけ)。[判定と後続処理を分ける](#判定と後続処理を分ける-receiver--worker) を参照 |
 
 **判定の閾値** (Jev のスコア S と確信度 C から Level を決める境界。いずれも実測ではなく安全側の初期値で、運用で調整する)
 
@@ -257,7 +287,7 @@ http.HandleFunc("POST /jev-argos/actions", func(w http.ResponseWriter, r *http.R
 | --- | --- | --- |
 | gRPC Health Checking Protocol (`grpc.health.v1.Health/Check`) | サービス名 `""` または `jevargos.v1.SignalService` | Kubernetes の `grpc` プローブ、`grpc_health_probe` |
 | `GET /api/healthz` (認証不要) | 管理 API | HTTP のヘルスチェック、ロードバランサー |
-| `jev-argos-server -healthcheck` | 上記 2 つ (管理 API が無効なら gRPC のみ) | シェルの無いコンテナイメージの `HEALTHCHECK` |
+| `jev-argos-server -healthcheck` | 上記 2 つ (管理 API が無効なら gRPC のみ、worker は管理 API のみ) | シェルの無いコンテナイメージの `HEALTHCHECK` |
 
 `-healthcheck` は同じ設定 (`JEV_ARGOS_GRPC_ADDR` / `JEV_ARGOS_API_ADDR`) で起動中のサーバーに接続し、
 正常なら終了コード 0、異常なら 1 を返す。
@@ -369,6 +399,7 @@ spec:
   判定ログも 0.5 秒ごと (または 500 件ごと) にまとめて保存する。
   同じ対象への承認待ちは DB の制約で 1 件に保たれる。
 - **LLM 分析の間引き**はレプリカごとに行うため、レプリカ数だけ分析の回数が増えうる。
+- **受信量が多い場合**は、[receiver と worker に分ける](#判定と後続処理を分ける-receiver--worker)。receiver だけを台数で増やせる。
 
 ## 差し替えポイント
 
@@ -387,7 +418,7 @@ spec:
 | **通知の文面** | `pkg/notify` の `SlackText` | 日本語の要約 |
 | **承認された対処の実行方法** | `pkg/action` の `Router` / `WebhookExecutor`、`components.go` の `newExecutor` | IP 遮断 → 遮断リスト、それ以外 → アプリの Webhook |
 | **アプリ固有の対処** | `pkg/approval` の `ActionType` | 7 種類 (IP 遮断・セッション無効化・縮小運転・アカウント停止 / 削除・データ削除・サービス停止) |
-| **判定後の処理の追加・削除** | `components.go` の `newLanes` | ログ・自動遮断・承認キュー・判定ログ・通知・LLM (処理ごとのキューとワーカー数) |
+| **判定後の処理の追加・削除** | `roles.go` の `receiverLanes` (判定サーバーで行う) / `workerLanes` (worker で行う) | 自動遮断・ログ / 承認キュー・判定ログ・通知・LLM (処理ごとのキュー、worker では consumer group) |
 | **統計の保存先** | `pkg/buffer` の `Buffer` | メモリ / Redis |
 | **LLM 用 DB ユーザーの権限** | `pkg/db` の Safe View の定義 (SQL コメント) | — (本番で設定する) |
 
