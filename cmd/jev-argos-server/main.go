@@ -33,6 +33,7 @@ import (
 	"time"
 
 	"github.com/jornJp0201/jev-argos/pkg/guardrail"
+	"github.com/jornJp0201/jev-argos/pkg/metrics"
 	"github.com/jornJp0201/jev-argos/pkg/receiver"
 	"github.com/jornJp0201/jev-argos/pkg/stream"
 )
@@ -127,10 +128,15 @@ func run(cfg config, logger *slog.Logger) error {
 	// --- 管理 HTTP API ---
 	stopAPI := func() {}
 	if cfg.apiAddr != "" {
+		ms := metricsSources{sig: sig, publisher: publisher, workers: w}
+		if cfg.role == roleWorker {
+			ms.rdb = rdb
+		}
+		metricsHandler := metrics.Handler(ms.collect)
 		var handler http.Handler
 		if cfg.role == roleReceiver {
-			handler = ingestOnlyHandler(cfg, sig) // 管理 API とダッシュボードは worker が提供する
-		} else if handler, err = adminHandler(cfg, w, blocklist, sig, logger); err != nil {
+			handler = ingestOnlyHandler(cfg, sig, metricsHandler) // 管理 API とダッシュボードは worker が提供する
+		} else if handler, err = adminHandler(cfg, w, blocklist, sig, metricsHandler, logger); err != nil {
 			return err
 		}
 		if stopAPI, err = startAPI(cfg, handler, serveErr, logger); err != nil {
