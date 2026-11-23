@@ -44,6 +44,12 @@ type config struct {
 	// HTTP でのシグナル受信 (pkg/receiver)
 	ingestToken string
 
+	// サーバーを守る上限 (pkg/receiver、gRPC)
+	grpcMaxStreams  uint32
+	grpcMaxMsgBytes int
+	maxInFlight     int
+	adapterRate     float64
+
 	// レベルを分ける閾値 (pkg/guardrail)。0 以下なら既定値。
 	blockScore      float64
 	blockConfidence float64
@@ -71,6 +77,20 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// envInt は環境変数 key を int として読む。未設定・空なら def、不正な値ならエラーで終了する。
+func envInt(key string, def int) int {
+	v, ok := os.LookupEnv(key)
+	if !ok || v == "" {
+		return def
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "invalid %s=%q (integer): %v\n", key, v, err)
+		os.Exit(2)
+	}
+	return n
 }
 
 func envDuration(key string, def time.Duration) time.Duration {
@@ -114,8 +134,14 @@ func parseConfig() (cfg config, healthcheck bool) {
 	flag.Float64Var(&cfg.blockConfidence, "block-confidence", envFloat("JEV_ARGOS_BLOCK_CONFIDENCE", 0), "confidence C required to auto-block; below this, S in the block range is downgraded to Level 3 (default 0.8)")
 	flag.Float64Var(&cfg.level3Score, "level3-score", envFloat("JEV_ARGOS_LEVEL3_SCORE", 0), "score S to reach Level 3 (default 2.5)")
 	flag.Float64Var(&cfg.level2Score, "level2-score", envFloat("JEV_ARGOS_LEVEL2_SCORE", 0), "score S to reach Level 2 (default 1.5)")
+	flag.IntVar(&cfg.maxInFlight, "max-in-flight", envInt("JEV_ARGOS_MAX_IN_FLIGHT", 4096), "max signals evaluated at once; OK responses are rejected first above 80% (0: unlimited)")
+	flag.Float64Var(&cfg.adapterRate, "adapter-rate", envFloat("JEV_ARGOS_ADAPTER_RATE", 10000), "max signals per second from one adapter (source IP); OK responses are rejected first (0: unlimited)")
+	grpcMaxStreams := flag.Int("grpc-max-streams", envInt("JEV_ARGOS_GRPC_MAX_STREAMS", 1000), "max concurrent gRPC streams per connection")
+	flag.IntVar(&cfg.grpcMaxMsgBytes, "grpc-max-msg-bytes", envInt("JEV_ARGOS_GRPC_MAX_MSG_BYTES", 64<<10), "max size of one received gRPC message (bytes)")
 	flag.StringVar(&cfg.role, "role", envOr("JEV_ARGOS_ROLE", roleAll), "process role: all | receiver (receive and judge) | worker (follow-up processing); receiver / worker require Redis")
 	flag.Parse()
+
+	cfg.grpcMaxStreams = uint32(max(1, *grpcMaxStreams))
 
 	role, err := parseRole(cfg.role)
 	if err != nil {
