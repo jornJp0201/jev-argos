@@ -45,6 +45,7 @@ type workers struct {
 	stores   decisionStores
 	proposer *approval.ProposeEmitter
 	hub      *events.Hub
+	llm      *llm.Emitter    // nil なら LLM 分析をしない
 	lanes    []receiver.Lane // all ではプロセス内のキュー、worker では consumer group になる
 }
 
@@ -85,6 +86,7 @@ func newWorkers(ctx context.Context, cfg config, pool *pgxpool.Pool, logger *slo
 			Logger:   logger,
 		}
 		llmEmitter.Start(ctx)
+		w.llm = llmEmitter
 	}
 	w.proposer = &approval.ProposeEmitter{Store: actions, Logger: logger, Window: approval.DefaultProposeWindow}
 	w.proposer.Start(ctx)
@@ -145,8 +147,15 @@ func startSignalServer(cfg config, buf buffer.Buffer, blocklist action.Blocklist
 		Level3Score:     cfg.level3Score,
 		Level2Score:     cfg.level2Score,
 	})
-	srv := receiver.NewServer(buf, classifier.NewDefault(), nil, receiver.Options{Lanes: lanes, Logger: logger, Observer: observer, Guardrail: &guard})
-	gs := grpc.NewServer()
+	srv := receiver.NewServer(buf, classifier.NewDefault(), nil, receiver.Options{
+		Lanes: lanes, Logger: logger, Observer: observer, Guardrail: &guard,
+		// 過負荷・アダプターの送りすぎのときは、正常な応答 (大半は Level 1) のシグナルから断る
+		Limits: receiver.Limits{MaxInFlight: cfg.maxInFlight, AdapterRate: cfg.adapterRate},
+	})
+	gs := grpc.NewServer(
+		grpc.MaxConcurrentStreams(cfg.grpcMaxStreams), // 1 接続あたりの同時ストリーム数
+		grpc.MaxRecvMsgSize(cfg.grpcMaxMsgBytes),      // シグナル 1 件は数 KB。大きなメッセージでメモリを使わせない
+	)
 	jevargosv1.RegisterSignalServiceServer(gs, srv)
 	jevargosv1.RegisterControlServiceServer(gs, &action.ControlServer{Blocklist: blocklist})
 	// 標準の gRPC Health Checking Protocol (Kubernetes の grpc プローブ・grpc_health_probe 用)
@@ -204,7 +213,7 @@ func startConsumers(ctx context.Context, rdb *redis.Client, w *workers, logger *
 }
 
 // adminHandler は管理 API (承認キュー・遮断リスト・ダッシュボードへの配信) を組み立てる。all と worker で使う。
-func adminHandler(cfg config, w *workers, blocklist action.Blocklist, sig *signalServer, logger *slog.Logger) (http.Handler, error) {
+func adminHandler(cfg config, w *workers, blocklist action.Blocklist, sig *signalServer, metricsHandler http.Handler, logger *slog.Logger) (http.Handler, error) {
 	apiCfg := api.Config{
 		Store:     w.actions,
 		Executor:  newExecutor(cfg, blocklist),
@@ -212,16 +221,20 @@ func adminHandler(cfg config, w *workers, blocklist action.Blocklist, sig *signa
 		Routes:    map[string]http.HandlerFunc{"GET /api/events/stream": w.hub.HandleStream},
 		Logger:    logger,
 	}
+	apiCfg.PublicRoutes = map[string]http.Handler{"GET /metrics": metricsHandler} // 件数だけなので認証しない (healthz と同じ)
 	if sig != nil && cfg.ingestToken != "" {
-		apiCfg.PublicRoutes = ingestRoutes(cfg, sig)
+		for pattern, h := range ingestRoutes(cfg, sig) {
+			apiCfg.PublicRoutes[pattern] = h
+		}
 	}
 	apiCfg.AdminToken = adminToken(cfg, logger)
 	return api.NewHandler(apiCfg)
 }
 
-// ingestOnlyHandler は receiver の HTTP: ヘルスチェックと、HTTP でのシグナル受信 (指定時) だけを提供する。
-func ingestOnlyHandler(cfg config, sig *signalServer) http.Handler {
+// ingestOnlyHandler は receiver の HTTP: ヘルスチェック・メトリクスと、HTTP でのシグナル受信 (指定時) だけを提供する。
+func ingestOnlyHandler(cfg config, sig *signalServer, metricsHandler http.Handler) http.Handler {
 	mux := http.NewServeMux()
+	mux.Handle("GET /metrics", metricsHandler)
 	mux.HandleFunc("GET /api/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
