@@ -643,6 +643,11 @@ go run ./cmd/jev-argos-server -demo   # 疑似的なリクエストを流して�
 PostgreSQL の結合テストは `JEV_ARGOS_TEST_POSTGRES_URL` を設定したときだけ実行されます。
 Redis・LLM (Ollama / Claude)・Slack のテストは擬似サーバーで動くため、外部サービスは不要です。
 
+# Ai利用について
+
+AIはClaude Codeを使用して作成しました。コミットする際は必ず本人が確認してコミットしています。比率は6:4です。
+
+
 ## ライセンス
 
 [MIT License](LICENSE)
