@@ -39,7 +39,7 @@ func (s *Server) HTTPHandler(token string) http.Handler {
 			writeJSONError(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
-		mux.ServeHTTP(w, r)
+		mux.ServeHTTP(w, r.WithContext(withAdapter(r.Context(), r.RemoteAddr)))
 	})
 }
 
@@ -107,6 +107,8 @@ func writeGRPCError(w http.ResponseWriter, err error) {
 		code = http.StatusBadRequest
 	case codes.Unavailable:
 		code = http.StatusServiceUnavailable
+	case codes.ResourceExhausted:
+		code = http.StatusTooManyRequests
 	}
 	writeJSONError(w, code, st.Message())
 }

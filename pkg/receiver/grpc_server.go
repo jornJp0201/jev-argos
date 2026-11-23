@@ -80,6 +80,8 @@ type Options struct {
 	// Guardrail はレベルを分ける閾値。nil なら既定値 (guardrail.Default())。
 	// [差し替えポイント] 判定を厳しく / 緩くしたい場合は guardrail.New(...) を渡す。
 	Guardrail *guardrail.Guardrail
+	// Limits は過負荷やアダプターの送りすぎからサーバーを守る上限 (既定は制限しない)。
+	Limits Limits
 }
 
 // Server は SignalService の実装。
@@ -91,6 +93,8 @@ type Server struct {
 	guard    guardrail.Guardrail
 	observer func(Event)
 	logger   *slog.Logger
+	admit    *admission
+	received [guardrail.Level4 + 1]atomic.Uint64 // Level ごとの判定数
 
 	mu      sync.RWMutex // closed と各 lane の events の close を保護する
 	closed  bool
@@ -129,6 +133,7 @@ func NewServer(buf buffer.Buffer, cls *classifier.Classifier, emitter Emitter, o
 		guard:    guard,
 		observer: opts.Observer,
 		logger:   opts.Logger,
+		admit:    newAdmission(opts.Limits),
 	}
 	lanes := opts.Lanes
 	if emitter != nil {
@@ -196,6 +201,13 @@ func (s *Server) Evaluate(ctx context.Context, signal *jevargosv1.SecuritySignal
 		return Event{}, status.Error(codes.InvalidArgument, "user_context.client_ip is required")
 	}
 
+	// 過負荷・送りすぎのときは、統計に記録する前に断る (正常な応答のシグナルから先に断る)
+	release, err := s.admit.admit(ctx, signal)
+	if err != nil {
+		return Event{}, err
+	}
+	defer release()
+
 	features, err := buffer.Observe(ctx, s.buf, signal)
 	if err != nil {
 		// バッファ (Redis 等) の障害。送信側は Fire-and-Forget のため、メイン処理には影響しない。
@@ -209,6 +221,7 @@ func (s *Server) Evaluate(ctx context.Context, signal *jevargosv1.SecuritySignal
 		Assessment: assessment,
 		Decision:   s.guard.Decide(assessment),
 	}
+	s.received[min(max(e.Decision.Level, 0), guardrail.Level4)].Add(1)
 	if s.observer != nil {
 		s.observer(e)
 	}
@@ -225,6 +238,32 @@ func (s *Server) Dropped() uint64 {
 		n += l.dropped.Load()
 	}
 	return n
+}
+
+// Stats は判定サーバーの状況 (メトリクス用)。
+type Stats struct {
+	Evaluated [guardrail.Level4 + 1]uint64 // Level ごとの判定数 (添字が Level)
+	// 断ったシグナルの数。正常な応答 (OK) とエラーに分けて数える
+	RateLimitedOK, RateLimitedError uint64 // アダプターごとの流量制限
+	OverloadedOK, OverloadedError   uint64 // 同時に判定する数の上限
+	InFlight                        int64  // 判定中のシグナル数
+	DroppedByLane                   map[string]uint64
+}
+
+// Stats は判定サーバーの状況を返す。
+func (s *Server) Stats() Stats {
+	st := Stats{
+		RateLimitedOK:    s.admit.rejected[reasonRateLimited][kindOK].Load(),
+		RateLimitedError: s.admit.rejected[reasonRateLimited][kindError].Load(),
+		OverloadedOK:     s.admit.rejected[reasonOverloaded][kindOK].Load(),
+		OverloadedError:  s.admit.rejected[reasonOverloaded][kindError].Load(),
+		InFlight:         s.admit.inFlight.Load(),
+		DroppedByLane:    s.DroppedByLane(),
+	}
+	for i := range st.Evaluated {
+		st.Evaluated[i] = s.received[i].Load()
+	}
+	return st
 }
 
 // DroppedByLane は Lane の名前ごとの、捨てたイベント数を返す。

@@ -158,6 +158,10 @@ JEV_ARGOS_ROLE=worker JEV_ARGOS_REDIS_URL=redis://localhost:6379/0 JEV_ARGOS_POS
 | `JEV_ARGOS_ADMIN_TOKEN` | (起動ごとに生成してログに出力) | 管理 API の Bearer トークン。本番では必ず指定する |
 | `JEV_ARGOS_INGEST_TOKEN` | (無効) | HTTP でのシグナル受信 (`POST /api/signals`) の送信専用トークン。管理用とは別にする |
 | `JEV_ARGOS_DEMO` | `false` | `true` で起動時に疑似シグナルを流す |
+| `JEV_ARGOS_MAX_IN_FLIGHT` | `4096` | 同時に判定するシグナルの上限。8 割を超えたら正常な応答のシグナルから断る。`0` で無制限 |
+| `JEV_ARGOS_ADAPTER_RATE` | `10000` | 1 つのアダプター (接続元の IP) から受け付ける 1 秒あたりのシグナル数。枠が半分を切ったら正常な応答のシグナルから断る。`0` で無制限 |
+| `JEV_ARGOS_GRPC_MAX_STREAMS` | `1000` | gRPC の 1 接続あたりの同時ストリーム数 |
+| `JEV_ARGOS_GRPC_MAX_MSG_BYTES` | `65536` | gRPC で受け取るメッセージ 1 件の最大サイズ (バイト)。シグナル 1 件は数 KB |
 | `JEV_ARGOS_ROLE` | `all` | `receiver` (受信と判定だけ) / `worker` (後続処理だけ)。[判定と後続処理を分ける](#判定と後続処理を分ける-receiver--worker) を参照 |
 
 **判定の閾値** (Jev のスコア S と確信度 C から Level を決める境界。いずれも実測ではなく安全側の初期値で、運用で調整する)
@@ -274,12 +278,30 @@ http.HandleFunc("POST /jev-argos/actions", func(w http.ResponseWriter, r *http.R
 | エンドポイント | 認証 | 内容 |
 | --- | --- | --- |
 | `GET /api/healthz` | なし | 死活確認 |
+| `GET /metrics` | なし | Prometheus 形式のメトリクス ([メトリクス](#メトリクス))。件数だけで機密情報は含まない |
 | `POST /api/signals`、`POST /api/signals/batch` | 送信専用トークン | HTTP (JSON) でのシグナル受信。本文は proto と同じフィールド名 |
 | `GET /api/actions[?status=pending]`、`GET /api/actions/{id}` | 管理トークン | 承認キュー |
 | `POST /api/actions` | 管理トークン | 管理者による起票 |
 | `POST /api/actions/{id}/approve`、`/reject` | 管理トークン | 承認 (実行) / 拒否 |
 | `GET /api/blocklist`、`POST /api/blocklist`、`DELETE /api/blocklist?target=...` | 管理トークン | 遮断リストの参照・手動の遮断・解除 |
 | `GET /api/actions/stream`、`/api/blocklist/stream`、`/api/events/stream` | 管理トークン | 承認キュー・遮断リスト・判定と LLM 分析の SSE 配信。判定は Level 2 以上を 1 件ずつ、Level 1 は 1 秒ごとの件数 (`summary`) で送る |
+
+## メトリクス
+
+`GET /metrics` (管理 API のポート、receiver では HTTP のポート) で、Prometheus 形式のメトリクスを出す。
+
+| メトリクス | 種類 | 内容 | 役割 |
+| --- | --- | --- | --- |
+| `jevargos_signals_evaluated_total{level}` | counter | 判定したシグナルの数 (Level ごと) | all / receiver |
+| `jevargos_signals_rejected_total{reason, status}` | counter | サーバーを守るために断ったシグナルの数。`reason` は `rate_limited` (アダプターごとの流量制限) / `overloaded` (同時に判定する数の上限)、`status` は `ok` / `error` | all / receiver |
+| `jevargos_signals_in_flight` | gauge | 判定中のシグナルの数 | all / receiver |
+| `jevargos_events_dropped_total{lane}` | counter | 後続処理のキューがあふれて捨てた判定の数 (キューごと) | all / receiver |
+| `jevargos_stream_publish_dropped_total` | counter | Redis Streams に追加できずに捨てた判定の数 | receiver |
+| `jevargos_stream_group_lag{group}` / `jevargos_stream_group_pending{group}` | gauge | 後続処理ごとの遅れ (まだ読んでいない件数) / 読んだが処理済みにしていない件数 | worker |
+| `jevargos_decision_logs_dropped_total` | counter | 判定ログの保存待ちがあふれて捨てた数 | all / worker |
+| `jevargos_llm_analyses_dropped_total` | counter | LLM 分析のキューがあふれて見送った数 | all / worker |
+
+`jevargos_signals_rejected_total{status="error"}` が増えている場合は、攻撃の兆候まで断っている。上限を上げるか、receiver を増やす。
 
 ## ヘルスチェック
 
